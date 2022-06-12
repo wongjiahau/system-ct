@@ -141,6 +141,25 @@ impl TypingContext {
             })
             .collect()
     }
+
+    fn union(&self, context: &Self) -> Self {
+        TypingContext(context.0.iter().fold(self.0.clone(), |result, typing| {
+            result.insert(typing.clone())
+        }))
+    }
+
+    fn substitute(&self, old_term_variable: &String, new_term_variable: &String) -> TypingContext {
+        TypingContext(self.0.into_iter().fold(Set::new(), |result, entry| {
+            result.insert(Typing {
+                name: if entry.name.eq(old_term_variable) {
+                    new_term_variable.clone()
+                } else {
+                    entry.name.clone()
+                },
+                scheme: entry.scheme.clone(),
+            })
+        }))
+    }
 }
 
 /// A pair x : σ is called a typing for x
@@ -168,17 +187,25 @@ impl TypingEnvironment {
 struct State {
     /// Used for generating fresh type variable
     fresh_type_variable_index: usize,
+    /// Used for generating fresh term variable
+    fresh_term_variable_index: usize,
 }
 
 impl State {
     fn new() -> State {
         State {
             fresh_type_variable_index: 0,
+            fresh_term_variable_index: 0,
         }
     }
     fn fresh_type_variable(&mut self) -> String {
         let result = format!("'{}", self.fresh_type_variable_index);
         self.fresh_type_variable_index += 1;
+        return result;
+    }
+    fn fresh_term_variable(&mut self) -> String {
+        let result = format!("#{}", self.fresh_term_variable_index);
+        self.fresh_term_variable_index += 1;
         return result;
     }
 }
@@ -193,6 +220,8 @@ fn ppc(term: Term, env: TypingEnvironment, state: &mut State) -> (ConstrainedTyp
     }
 }
 
+/// Expression ptε(x,A) computes both type and context for x in A, similarly to pt(x,Γ),
+/// introducing fresh type variables for let-bound variables as defined below:
 fn pte(
     name: String,
     env: TypingEnvironment,
@@ -223,8 +252,29 @@ fn pte(
         // else ({x′ : lcg({τi})}. lcg({τi}), U Γi[x′/x]),
         //   where A(x)={(∀(αj)i.κi.τi,Γi)} and x′ is a fresh term variable
         Some((head, tail)) => {
-            todo!()
-            //
+            let x_prime = state.fresh_term_variable();
+            let lcgti = lcg(
+                NonEmpty(
+                    head.scheme.constrained_type.r#type.clone(),
+                    tail.iter()
+                        .map(|entry| entry.scheme.constrained_type.r#type.clone())
+                        .collect(),
+                ),
+                state,
+            );
+            (
+                ConstrainedType {
+                    constraints: vec![Constraint {
+                        name: state.fresh_term_variable(),
+                        r#type: lcgti.clone(),
+                    }],
+                    r#type: lcgti,
+                },
+                tail.iter()
+                    .fold(head.context.substitute(&name, &x_prime), |result, entry| {
+                        result.union(&entry.context.substitute(&name, &x_prime))
+                    }),
+            )
         }
     }
 }
