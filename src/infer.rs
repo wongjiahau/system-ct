@@ -129,11 +129,11 @@ impl std::hash::Hash for TypingEntry {
 struct TypingContext(Set<Typing>);
 
 impl TypingContext {
-    fn types_of(&self, name: String) -> Set<Scheme> {
+    fn types_of(&self, name: &String) -> Set<Scheme> {
         self.0
             .iter()
             .filter_map(|typing| {
-                if typing.name == name {
+                if typing.name.eq(name) {
                     Some(typing.scheme.clone())
                 } else {
                     None
@@ -213,10 +213,71 @@ impl State {
 /// The type inference algorithm.
 fn ppc(term: Term, env: TypingEnvironment, state: &mut State) -> (ConstrainedType, TypingContext) {
     match term {
+        // PPc(x,A) = ptε(x,A)
         Term::Var { name } => pte(name, env, state),
-        Term::Lambda { parameter, body } => todo!(),
+
+        // PPc(λu.e,A) =
+        Term::Lambda { parameter: u, body } => {
+            // let (κ. τ, Γ ) = P Pc(e, A)
+            let (
+                ConstrainedType {
+                    constraints: k,
+                    r#type: t,
+                },
+                gamma,
+            ) = ppc(*body, env, state);
+            //  if u:τ′ ∈ Γ,for some τ′
+            if let Some(scheme) = gamma
+                .types_of(&u)
+                .into_iter()
+                .collect::<Vec<&Scheme>>()
+                .first()
+            //    then (κ. τ′ → τ, Γ − {u : τ′})
+            {
+                if scheme.type_variables.is_empty()
+                    && scheme.constrained_type.constraints.is_empty()
+                {
+                    let t_prime = scheme.constrained_type.r#type.clone();
+                    return (
+                        ConstrainedType {
+                            constraints: k,
+                            r#type: function_type(t_prime, t),
+                        },
+                        TypingContext(gamma.0.remove(&Typing {
+                            name: u.clone(),
+                            scheme: scheme.clone().clone(),
+                        })),
+                    );
+                }
+            }
+
+            //    else (κ. α → τ, Γ ), where α is a fresh type variable
+            let a = type_variable(state.fresh_type_variable(), vec![]);
+            (
+                ConstrainedType {
+                    constraints: k,
+                    r#type: function_type(a, t),
+                },
+                gamma,
+            )
+        }
+
         Term::Application { function, argument } => todo!(),
         Term::Let { name, value, body } => todo!(),
+    }
+}
+
+fn type_variable(name: String, arguments: Vec<Type>) -> Type {
+    Type {
+        kind: TypeKind::TypeVariable(name),
+        arguments,
+    }
+}
+
+fn function_type(input: Type, output: Type) -> Type {
+    Type {
+        kind: TypeKind::Named("->".to_string()),
+        arguments: vec![input, output],
     }
 }
 
@@ -365,13 +426,6 @@ mod tests {
     fn named_type(name: String, arguments: Vec<Type>) -> Type {
         Type {
             kind: TypeKind::Named(name),
-            arguments,
-        }
-    }
-
-    fn type_variable(name: String, arguments: Vec<Type>) -> Type {
-        Type {
-            kind: TypeKind::TypeVariable(name),
             arguments,
         }
     }
