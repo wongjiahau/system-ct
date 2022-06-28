@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 rpds = "0.11.0"
+array_tool = "1.0.3"
