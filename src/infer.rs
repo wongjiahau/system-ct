@@ -1,6 +1,5 @@
-use array_tool::vec::{Union, Uniq};
+use array_tool::vec::{Intersect, Union, Uniq};
 use rpds::HashTrieSet as Set;
-use std::collections::HashSet;
 
 pub enum Term {
     Int(isize),
@@ -61,11 +60,33 @@ pub struct ConstrainedType {
 pub struct Constraints(Vec<Constraint>);
 
 impl Constraints {
-    fn applied_by(&self, substitution: &Substitution) -> Constraints {
+    /// The restriction of a set of constraints κ to a set of type variables V , denoted by κ|V ,
+    /// is defined inductively as follows:
+    fn restrictions(&self, v: &TypeVariables) -> Constraints {
+        match self.0.split_first() {
+            // ∅|V =∅
+            None => Constraints(vec![]),
+            Some((head, tail)) => {
+                // {o:τ}|V =if tv(τ)∩V =∅ then ∅ else {o:τ}
+                let Constraint { name: o, r#type: t } = head;
+                if t.free_type_variables().intersect(v.to_vec()).is_empty() {
+                    Constraints(vec![])
+                } else {
+                    Constraints(vec![Constraint {
+                        name: o.clone(),
+                        r#type: t.clone(),
+                    }])
+                }
+                // ({o:τ}∪κ′)|V ={o:τ}|V ∪ κ′|V
+                .union(Constraints(tail.to_vec()).restrictions(v))
+            }
+        }
+    }
+    fn applied_by(&self, substitutions: &Substitutions) -> Constraints {
         Constraints(
             self.0
                 .iter()
-                .map(|constraint| constraint.applied_by(substitution))
+                .map(|constraint| constraint.applied_by(substitutions))
                 .collect(),
         )
     }
@@ -115,12 +136,12 @@ impl Type {
     }
 
     /// Sσ denotes the type obtained by substituting S(α) for each occurrence of free type variable α in σ
-    fn applied_by(&self, substitution: &Substitution) -> Type {
+    fn applied_by(&self, substitutions: &Substitutions) -> Type {
         Type {
             type_variables: self.type_variables.clone(),
             constrained_type: ConstrainedType {
-                constraints: self.constrained_type.constraints.applied_by(substitution),
-                r#type: self.constrained_type.r#type.applied_by(substitution),
+                constraints: self.constrained_type.constraints.applied_by(substitutions),
+                r#type: self.constrained_type.r#type.applied_by(substitutions),
             },
         }
     }
@@ -143,10 +164,10 @@ impl Constraint {
         }
     }
 
-    fn applied_by(&self, substitution: &Substitution) -> Constraint {
+    fn applied_by(&self, substitutions: &Substitutions) -> Constraint {
         Constraint {
             name: self.name.clone(),
-            r#type: self.r#type.applied_by(substitution),
+            r#type: self.r#type.applied_by(substitutions),
         }
     }
 }
@@ -206,30 +227,10 @@ impl SimpleType {
             .any(|argument| argument.contains(name))
     }
 
-    fn applied_by(&self, substitution: &Substitution) -> SimpleType {
-        match substitution {
-            Substitution::Identity => self.clone(),
-            Substitution::SubstituteType { old, new, next } => match &self.kind {
-                TypeKind::TypeConstructor(_) => self.clone(),
-                TypeKind::TypeVariable(a) => {
-                    let result = if a.eq(old) { new.clone() } else { self.clone() };
-                    result.applied_by(next)
-                }
-            },
-            Substitution::SubstituteTypeKind { old, new, next } => match &self.kind {
-                TypeKind::TypeConstructor(x) | TypeKind::TypeVariable(x) => {
-                    let kind = if x.eq(old) {
-                        new.clone()
-                    } else {
-                        self.kind.clone()
-                    };
-                    SimpleType {
-                        kind,
-                        arguments: self.arguments.clone(),
-                    }
-                    .applied_by(next)
-                }
-            },
+    fn applied_by(&self, substitutions: &Substitutions) -> SimpleType {
+        match substitutions {
+            Substitutions::Identity => self.clone(),
+            Substitutions::Compose { left, right } => right.apply(self).applied_by(left),
         }
     }
 
@@ -378,13 +379,13 @@ impl TypingContext {
     }
 
     /// SΓ denotes {x : Sσ | x : σ ∈ Γ}
-    fn applied_by(&self, substitution: &Substitution) -> TypingContext {
+    fn applied_by(&self, substitutions: &Substitutions) -> TypingContext {
         TypingContext(
             self.0
                 .into_iter()
                 .map(|entry| Typing {
                     variable: entry.variable.clone(),
-                    r#type: entry.r#type.applied_by(substitution),
+                    r#type: entry.r#type.applied_by(substitutions),
                 })
                 .collect(),
         )
@@ -542,17 +543,44 @@ pub fn ppc(
             // ss =sat(Sκ1 ∪ Sκ2,Γ′)
             let ss = sat(k1.applied_by(&s).union(k2.applied_by(&s)), &gamma_prime);
 
-            todo!()
+            // if ss =∅ then fail
+            match ss.split_first() {
+                None => Err(InferError::NotSatifiable),
+                Some((head, tail)) => {
+                    // else
+                    // let S∆ = intesection ss,
+                    let s_delta = intersection(NonEmpty(head.clone(), tail.to_vec()));
+                    // Γ=S∆Γ′,
+                    // τ=S∆Sα,
+                    //V =tv(τ,Γ), κ=unresolved(S∆S(κ1 ∪κ2),Γ)
+                    todo!()
+                }
+            }
         }
         Term::Let { name, value, body } => todo!(),
         Term::Int(_) => todo!(),
     }
 }
 
-fn sat(k: Constraints, gamma: &TypingContext) -> Vec<Substitution> {
+/// The intersection of a set of substitutions S, denoted by intersection(S), is defined as follows:
+fn intersection(ss: NonEmpty<Substitutions>) -> Substitutions {
+    match ss.1.split_first() {
+        // intersection {S} = S
+        None => ss.0,
+        // intersection ({S}∪SS)=S|V where V ={α| S(α)=S′(α),and S′ = intersection(SS)}
+        Some((head, tail)) => {
+            let s = ss.0;
+            let ss = NonEmpty(head.clone(), tail.to_vec());
+            let s_prime = intersection(ss);
+            todo!()
+        }
+    }
+}
+
+fn sat(k: Constraints, gamma: &TypingContext) -> Vec<Substitutions> {
     match k.0.split_first() {
         // sat(∅,Γ) = {id}
-        None => vec![Substitution::Identity],
+        None => vec![Substitutions::Identity],
 
         Some((head, tail)) => {
             let Constraint { name: o, r#type: t } = head;
@@ -608,12 +636,43 @@ fn sat(k: Constraints, gamma: &TypingContext) -> Vec<Substitution> {
                             let sijs = sat(k.applied_by(&si), &gamma.applied_by(&si));
                             sijs.into_iter()
                                 .map(|sij| sij.compose(&si))
-                                .collect::<Vec<Substitution>>()
+                                .collect::<Vec<Substitutions>>()
                         })
-                        .collect::<Vec<Substitution>>()
+                        .collect::<Vec<Substitutions>>()
                         .unique()
                 }
             }
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Clone)]
+enum Substitutions {
+    /// Remember that right comes before left in function composition
+    Compose {
+        left: Box<Substitutions>,
+        right: Substitution,
+    },
+    Identity,
+}
+
+impl Substitutions {
+    fn print(&self) -> String {
+        match self {
+            Substitutions::Compose { left, right } => {
+                format!("{}, {}", left.print(), right.print())
+            }
+            Substitutions::Identity => "".to_string(),
+        }
+    }
+
+    fn compose(&self, right: &Substitutions) -> Substitutions {
+        match right {
+            Substitutions::Compose { left, right } => Substitutions::Compose {
+                left: Box::new(left.compose(self)),
+                right: right.clone(),
+            },
+            Substitutions::Identity => self.clone(),
         }
     }
 }
@@ -623,19 +682,8 @@ fn sat(k: Constraints, gamma: &TypingContext) -> Vec<Substitution> {
 /// many variables
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum Substitution {
-    Identity,
-    SubstituteType {
-        old: String,
-        new: SimpleType,
-        /// This is necessary for implementing composition
-        next: Box<Substitution>,
-    },
-    SubstituteTypeKind {
-        old: String,
-        new: TypeKind,
-        /// This is necessary for implementing composition
-        next: Box<Substitution>,
-    },
+    SubstituteType { old: String, new: SimpleType },
+    SubstituteTypeKind { old: String, new: TypeKind },
 }
 
 #[derive(Debug, Clone)]
@@ -644,7 +692,7 @@ struct Equation {
     right: SimpleType,
 }
 
-fn unify(equations: Vec<Equation>) -> Result<Substitution, InferError> {
+fn unify(equations: Vec<Equation>) -> Result<Substitutions, InferError> {
     // unify(E) = Unify(E, ∅)
     Unify(equations, vec![])
 }
@@ -653,6 +701,7 @@ fn unify(equations: Vec<Equation>) -> Result<Substitution, InferError> {
 pub enum InferError {
     RecursiveSubstitution,
     CannotUnify { left: String, right: String },
+    NotSatifiable,
 }
 
 type TypeVariables = Vec<String>;
@@ -660,10 +709,10 @@ type TypeVariables = Vec<String>;
 fn Unify(
     equations: Vec<Equation>,
     type_variables: TypeVariables,
-) -> Result<Substitution, InferError> {
+) -> Result<Substitutions, InferError> {
     match equations.split_first() {
         // Unify(∅,V)= id
-        None => Ok(Substitution::Identity),
+        None => Ok(Substitutions::Identity),
 
         // Unify(E∪{Cτ1...τn=C′τ1′...τm′ },V)=
         Some((
@@ -744,13 +793,15 @@ fn Unify(
                     } if !type_variables.contains(b) && arguments.is_empty() => {
                         // then Unify(E[α/β],V)◦(β→α)
                         let a = type_variable(a.clone());
-                        Ok(Substitution::SubstituteType {
-                            old: b.to_string(),
-                            new: a.clone(),
-                            next: Box::new(Unify(
+                        Ok(Substitutions::Compose {
+                            left: Box::new(Unify(
                                 substitute_type(equations.to_vec(), b, &a),
                                 type_variables,
                             )?),
+                            right: Substitution::SubstituteType {
+                                old: b.to_string(),
+                                new: a.clone(),
+                            },
                         })
                     }
                     _ => panic!("Failed"),
@@ -758,13 +809,15 @@ fn Unify(
             }
             // else Unify(E[τ/α], V) ◦ (α → τ)
             else {
-                Ok(Substitution::SubstituteType {
-                    old: a.to_string(),
-                    new: t.clone(),
-                    next: Box::new(Unify(
+                Ok(Substitutions::Compose {
+                    left: Box::new(Unify(
                         substitute_type(equations.to_vec(), a, t),
                         type_variables,
                     )?),
+                    right: Substitution::SubstituteType {
+                        old: a.to_string(),
+                        new: t.clone(),
+                    },
                 })
             }
         }
@@ -814,13 +867,15 @@ fn Unify(
                     .collect::<Vec<Equation>>(),
             );
 
-            Ok(Substitution::SubstituteTypeKind {
-                old: a.clone(),
-                new: x_kind.clone(),
-                next: Box::new(Unify(
+            Ok(Substitutions::Compose {
+                left: Box::new(Unify(
                     substitute_type_kind(equations.to_vec(), a, x_kind),
                     type_variables,
                 )?),
+                right: Substitution::SubstituteTypeKind {
+                    old: a.clone(),
+                    new: x_kind.clone(),
+                },
             })
         }
     }
@@ -1115,24 +1170,32 @@ mod tests {
                 }),
         );
 
-        let s1 = Substitution::SubstituteType {
-            old: "a".to_string(),
-            new: float(),
-            next: Box::new(Substitution::SubstituteType {
-                old: "b".to_string(),
-                new: int(),
-                next: Box::new(Substitution::Identity),
+        let s1 = Substitutions::Compose {
+            left: Box::new(Substitutions::Compose {
+                left: Box::new(Substitutions::Identity),
+                right: Substitution::SubstituteType {
+                    old: "b".to_string(),
+                    new: int(),
+                },
             }),
+            right: Substitution::SubstituteType {
+                old: "a".to_string(),
+                new: float(),
+            },
         }
         .print();
-        let s2 = Substitution::SubstituteType {
-            old: "a".to_string(),
-            new: int(),
-            next: Box::new(Substitution::SubstituteType {
-                old: "b".to_string(),
-                new: float(),
-                next: Box::new(Substitution::Identity),
+        let s2 = Substitutions::Compose {
+            left: Box::new(Substitutions::Compose {
+                left: Box::new(Substitutions::Identity),
+                right: Substitution::SubstituteType {
+                    old: "b".to_string(),
+                    new: float(),
+                },
             }),
+            right: Substitution::SubstituteType {
+                old: "a".to_string(),
+                new: int(),
+            },
         }
         .print();
 
@@ -1153,10 +1216,10 @@ mod tests {
 
         let mut actual = sat(k, &gamma)
             .iter()
-            .map(Substitution::print)
+            .map(Substitutions::print)
             .collect::<Vec<String>>();
         actual.sort();
-        assert_eq!(actual, vec![s1, s2]);
+        assert_eq!(actual, vec![s2, s1]);
     }
 
     #[test]
@@ -1218,36 +1281,42 @@ fn vect_difference<T: Eq + Clone>(v1: &Vec<T>, v2: &Vec<T>) -> Vec<T> {
     v1.iter().filter(|&x| !v2.contains(x)).cloned().collect()
 }
 impl Substitution {
-    fn compose(self, si: &Substitution) -> Substitution {
-        let left = self;
-        let right = si;
-        // Remember that rights comes before left in function composition
-        match right {
-            Substitution::Identity => left,
-            Substitution::SubstituteType { old, new, next } => Substitution::SubstituteType {
-                old: old.clone(),
-                new: new.clone(),
-                next: Box::new(left.compose(next)),
-            },
-            Substitution::SubstituteTypeKind { old, new, next } => {
-                Substitution::SubstituteTypeKind {
-                    old: old.clone(),
-                    new: new.clone(),
-                    next: Box::new(left.compose(next)),
-                }
+    fn print(&self) -> String {
+        match self {
+            Substitution::SubstituteType { old, new } => {
+                format!("{} ~> {}", old, new.print())
+            }
+            Substitution::SubstituteTypeKind { old, new } => {
+                format!("{} ~>> {}", old, new.print())
             }
         }
     }
 
-    fn print(&self) -> String {
+    fn apply(&self, simple_type: &SimpleType) -> SimpleType {
         match self {
-            Substitution::Identity => "".to_string(),
-            Substitution::SubstituteType { old, new, next } => {
-                format!("{} ~> {}, {}", old, new.print(), next.print())
-            }
-            Substitution::SubstituteTypeKind { old, new, next } => {
-                format!("{} ~>> {}, {}", old, new.print(), next.print())
-            }
+            Substitution::SubstituteType { old, new } => match &simple_type.kind {
+                TypeKind::TypeConstructor(_) => simple_type.clone(),
+                TypeKind::TypeVariable(a) => {
+                    if a.eq(old) {
+                        new.clone()
+                    } else {
+                        simple_type.clone()
+                    }
+                }
+            },
+            Substitution::SubstituteTypeKind { old, new } => match &simple_type.kind {
+                TypeKind::TypeConstructor(x) | TypeKind::TypeVariable(x) => {
+                    let kind = if x.eq(old) {
+                        new.clone()
+                    } else {
+                        simple_type.kind.clone()
+                    };
+                    SimpleType {
+                        kind,
+                        arguments: simple_type.arguments.clone(),
+                    }
+                }
+            },
         }
     }
 }
