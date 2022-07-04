@@ -390,6 +390,16 @@ impl TypingContext {
                 .collect(),
         )
     }
+
+    fn free_type_variables(&self) -> Vec<String> {
+        self.0
+            .into_iter()
+            .filter_map(|entry| match &entry.r#type.constrained_type.r#type.kind {
+                TypeKind::TypeConstructor(_) => None,
+                TypeKind::TypeVariable(a) => Some(a.clone()),
+            })
+            .collect()
+    }
 }
 
 /// A pair x : σ is called a typing for x
@@ -521,6 +531,7 @@ pub fn ppc(
 
             // S=unify({τu =τu′ |u:τu ∈ Γ1 and u:τu′ ∈ Γ2} ∪ {τ1 =τ2 → α})
             // where α is a fresh type variable
+            let a = type_variable(state.fresh_type_variable());
             let equations = {
                 let mut equations: Vec<Equation> = gamma1
                     .intersected_variables(&gamma2)
@@ -528,10 +539,9 @@ pub fn ppc(
                     .map(|(left, right)| Equation { left, right })
                     .collect();
 
-                let a = type_variable(state.fresh_type_variable());
                 equations.push(Equation {
                     left: t1,
-                    right: function_type(t2, a),
+                    right: function_type(t2, a.clone()),
                 });
                 equations
             };
@@ -550,9 +560,16 @@ pub fn ppc(
                     // else
                     // let S∆ = intesection ss,
                     let s_delta = intersection(NonEmpty(head.clone(), tail.to_vec()));
+
                     // Γ=S∆Γ′,
+                    let gamma = gamma_prime.applied_by(&s_delta);
+
                     // τ=S∆Sα,
-                    //V =tv(τ,Γ), κ=unresolved(S∆S(κ1 ∪κ2),Γ)
+                    let t = a.applied_by(&s).applied_by(&s_delta);
+
+                    //V =tv(τ,Γ),
+                    let v = t.free_type_variables().union(gamma.free_type_variables());
+                    //κ=unresolved(S∆S(κ1 ∪κ2),Γ)
                     todo!()
                 }
             }
@@ -572,7 +589,16 @@ fn intersection(ss: NonEmpty<Substitutions>) -> Substitutions {
             let s = ss.0;
             let ss = NonEmpty(head.clone(), tail.to_vec());
             let s_prime = intersection(ss);
-            todo!()
+            let v: Vec<String> = s.flat_map(&|x| {
+                s_prime.flat_map(&|y| {
+                    if x.eq(y) {
+                        vec![x.type_variable()]
+                    } else {
+                        vec![]
+                    }
+                })
+            });
+            s.restrictions(&v)
         }
     }
 }
@@ -675,6 +701,57 @@ impl Substitutions {
             Substitutions::Identity => self.clone(),
         }
     }
+
+    fn flat_map<F, T>(&self, f: &F) -> Vec<T>
+    where
+        F: Fn(&Substitution) -> Vec<T>,
+    {
+        match self {
+            Substitutions::Compose { left, right } => {
+                let mut result = left.flat_map(f);
+                result.extend(f(&right));
+                result
+            }
+            Substitutions::Identity => vec![],
+        }
+    }
+
+    fn restrictions(&self, v: &Vec<String>) -> Substitutions {
+        match self {
+            Substitutions::Compose { left, right } => {
+                let right = match right {
+                    Substitution::SubstituteType { old, new } => {
+                        if v.contains(old) {
+                            Some(Substitution::SubstituteType {
+                                old: old.clone(),
+                                new: new.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    Substitution::SubstituteTypeKind { old, new } => {
+                        if v.contains(old) {
+                            Some(Substitution::SubstituteTypeKind {
+                                old: old.clone(),
+                                new: new.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                };
+                match right {
+                    Some(right) => Substitutions::Compose {
+                        left: Box::new(left.restrictions(v)),
+                        right,
+                    },
+                    None => left.restrictions(v),
+                }
+            }
+            Substitutions::Identity => Substitutions::Identity,
+        }
+    }
 }
 
 /// A type substitution (or simply substitution) is a function from type variables to simple
@@ -682,8 +759,16 @@ impl Substitutions {
 /// many variables
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum Substitution {
-    SubstituteType { old: String, new: SimpleType },
-    SubstituteTypeKind { old: String, new: TypeKind },
+    SubstituteType {
+        /// Type variable
+        old: String,
+        new: SimpleType,
+    },
+    SubstituteTypeKind {
+        /// Type variable
+        old: String,
+        new: TypeKind,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1289,6 +1374,13 @@ impl Substitution {
             Substitution::SubstituteTypeKind { old, new } => {
                 format!("{} ~>> {}", old, new.print())
             }
+        }
+    }
+
+    fn type_variable(&self) -> String {
+        match self {
+            Substitution::SubstituteType { old, .. } => old.to_string(),
+            Substitution::SubstituteTypeKind { old, .. } => old.to_string(),
         }
     }
 
