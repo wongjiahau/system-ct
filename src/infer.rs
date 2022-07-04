@@ -569,13 +569,73 @@ pub fn ppc(
 
                     //V =tv(τ,Γ),
                     let v = t.free_type_variables().union(gamma.free_type_variables());
+
                     //κ=unresolved(S∆S(κ1 ∪κ2),Γ)
+                    let k = unresolved(k1.union(k2).applied_by(&s).applied_by(&s_delta), &gamma);
                     todo!()
                 }
             }
         }
         Term::Let { name, value, body } => todo!(),
         Term::Int(_) => todo!(),
+    }
+}
+
+fn unresolved(constraints: Constraints, gamma: &TypingContext) -> Constraints {
+    match constraints.0.split_first() {
+        // unresolved (∅, Γ ) = ∅
+        None => Constraints(vec![]),
+        // unresolved({o:τ}∪κ,Γ) =
+        Some((Constraint { name: o, r#type: t }, k)) => {
+            // where κ′ =
+            let k_prime: Constraints = match sat(
+                Constraints(vec![Constraint {
+                    name: o.clone(),
+                    r#type: t.clone(),
+                }]),
+                &gamma,
+            )
+            .as_slice()
+            {
+                //   if sat({o : τ},Γ) = {S}, for some S,
+                [s] => {
+                    // where ∀αj.κ′.τ′ ∈ Γ(o), Sτ = Sτ′
+                    let types_of_o = gamma.types_of(o);
+                    let Type {
+                        constrained_type:
+                            ConstrainedType {
+                                constraints: k_prime,
+                                ..
+                            },
+                        ..
+                    } = types_of_o
+                        .into_iter()
+                        .find(
+                            |Type {
+                                 constrained_type:
+                                     ConstrainedType {
+                                         r#type: t_prime, ..
+                                     },
+                                 ..
+                             }| {
+                                t.applied_by(&s).eq(&t_prime.applied_by(&s))
+                            },
+                        )
+                        .expect("Should not be possible");
+
+                    //   then unresolved(Sκ′,Γ),
+                    unresolved(k_prime.applied_by(&s), gamma)
+                }
+                //   else {o : τ}
+                _ => Constraints(vec![Constraint {
+                    name: o.clone(),
+                    r#type: t.clone(),
+                }]),
+            };
+
+            // κ′ ∪ unresolved(κ,Γ)
+            k_prime.union(unresolved(Constraints(k.to_vec()), gamma))
+        }
     }
 }
 
