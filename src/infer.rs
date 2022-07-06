@@ -627,8 +627,17 @@ pub fn ppc(
                 }
             }
         }
+        Term::Int(_) => Ok((
+            ConstrainedType {
+                constraints: Constraints(vec![]),
+                r#type: SimpleType {
+                    kind: TypeKind::TypeConstructor("Int".to_string()),
+                    arguments: vec![],
+                },
+            },
+            TypingContext(Set::new()),
+        )),
         Term::Let { name, value, body } => todo!(),
-        Term::Int(_) => todo!(),
     }
 }
 
