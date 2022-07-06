@@ -143,6 +143,7 @@ struct Constraint {
 /// σ ::= ∀αi. ∆
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 struct Type {
+    /// Quantified type variables
     type_variables: TypeVariables,
     constrained_type: ConstrainedType,
 }
@@ -170,6 +171,10 @@ impl Type {
             },
         }
     }
+
+    fn free_type_variables(&self) -> TypeVariables {
+        self.constrained_type.free_type_variables() - self.type_variables.clone()
+    }
 }
 
 impl ConstrainedType {
@@ -178,6 +183,12 @@ impl ConstrainedType {
             constraints: self.constraints.substitute_type(type_variable, with_type),
             r#type: self.r#type.substitute_type(type_variable, with_type),
         }
+    }
+
+    fn free_type_variables(&self) -> TypeVariables {
+        self.constraints
+            .free_type_variables()
+            .union(self.r#type.free_type_variables())
     }
 }
 
@@ -320,6 +331,34 @@ impl TypingEnvironment {
             elements: Set::new(),
         }
     }
+
+    /// We write A(x) for the set of entries of x in A
+    fn entries_of(&self, name: &String) -> Vec<TypingEntry> {
+        self.elements
+            .iter()
+            .filter_map(|element| {
+                if &element.name == name {
+                    Some(element.entry.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// At(x) for the set of first elements (i.e. the types) in these entries.
+    fn types_of(&self, x: &String) -> Vec<Type> {
+        self.entries_of(x)
+            .into_iter()
+            .map(|entry| entry.r#type)
+            .collect()
+    }
+
+    fn add_entry(&self, name: String, entry: TypingEntry) -> TypingEnvironment {
+        TypingEnvironment {
+            elements: self.elements.insert(TypingEnvElement { name, entry }),
+        }
+    }
 }
 
 /// x : (σ,Γ)
@@ -332,13 +371,13 @@ struct TypingEnvElement {
 /// Pair (σ,Γ) is called an entry for x in A
 #[derive(PartialEq, Eq, Clone, Debug)]
 struct TypingEntry {
-    scheme: Type,
+    r#type: Type,
     context: TypingContext,
 }
 
 impl std::hash::Hash for TypingEntry {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.scheme.hash(state);
+        self.r#type.hash(state);
     }
 }
 
@@ -440,21 +479,6 @@ struct Typing {
     r#type: Type,
 }
 
-impl TypingEnvironment {
-    fn types_of(&self, name: &String) -> Vec<TypingEntry> {
-        self.elements
-            .iter()
-            .filter_map(|element| {
-                if &element.name == name {
-                    Some(element.entry.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-}
-
 pub struct State {
     /// Used for generating fresh type variable
     fresh_type_variable_index: usize,
@@ -484,23 +508,26 @@ impl State {
 /// The type inference algorithm.
 pub fn ppc(
     term: Term,
-    env: &TypingEnvironment,
+    A: &TypingEnvironment,
     state: &mut State,
 ) -> Result<(ConstrainedType, TypingContext), InferError> {
     match term {
         // PPc(x,A) = ptε(x,A)
-        Term::Var { name } => Ok(pte(name, env, state)),
+        Term::Var { name: x } => Ok(pte(x, A, state)),
 
         // PPc(λu.e,A) =
-        Term::Lambda { parameter: u, body } => {
-            // let (κ. τ, Γ ) = P Pc(e, A)
+        Term::Lambda {
+            parameter: u,
+            body: e,
+        } => {
+            // let (κ. τ, Γ ) = PPc(e, A)
             let (
                 ConstrainedType {
                     constraints: k,
                     r#type: t,
                 },
                 gamma,
-            ) = ppc(*body, env, state)?;
+            ) = ppc(*e, A, state)?;
             //  if u:τ′ ∈ Γ,for some τ′
             if let Some(scheme) = gamma
                 .types_of(&u)
@@ -549,7 +576,7 @@ pub fn ppc(
                     r#type: t1,
                 },
                 gamma1,
-            ) = ppc(*e1, env, state)?;
+            ) = ppc(*e1, A, state)?;
 
             // (κ2 . τ2 , Γ2) = PPc (e2 , A)
             let (
@@ -558,7 +585,7 @@ pub fn ppc(
                     r#type: t2,
                 },
                 gamma2,
-            ) = ppc(*e2, env, state)?;
+            ) = ppc(*e2, A, state)?;
 
             // S=unify({τu =τu′ |u:τu ∈ Γ1 and u:τu′ ∈ Γ2} ∪ {τ1 =τ2 → α})
             // where α is a fresh type variable
@@ -637,7 +664,159 @@ pub fn ppc(
             },
             TypingContext(Set::new()),
         )),
-        Term::Let { name, value, body } => todo!(),
+
+        // PPc(let o = e1 in e2,A) =
+        Term::Let {
+            name: o,
+            value: e1,
+            body: e2,
+        } => {
+            // let (κ1 . τ1 , Γ1 ) = P Pc (e1 , A)
+            let (
+                ConstrainedType {
+                    constraints: k1,
+                    r#type: t1,
+                },
+                gamma1,
+            ) = ppc(*e1, A, state)?;
+
+            // σ = close(κ1. τ1, Γ1)
+            let theta = close(
+                ConstrainedType {
+                    constraints: k1.clone(),
+                    r#type: t1,
+                },
+                &gamma1,
+            );
+
+            // in if ρc(σ,At(o)) does not hold then fail
+            if !overloadable(&theta, A.types_of(&o)) {
+                return Err(InferError::CannotBeOverloaded {
+                    name: o.clone(),
+                    r#type: theta,
+                    existing_types: A.types_of(&o),
+                });
+            }
+
+            // else let A′ = A ∪ {o:(σ,Γ1)}
+            let A_prime = A.add_entry(
+                o,
+                TypingEntry {
+                    r#type: theta,
+                    context: gamma1.clone(),
+                },
+            );
+
+            // (κ2. τ2, Γ2) = PPc(e2, A′)
+            let (
+                ConstrainedType {
+                    constraints: k2,
+                    r#type: t2,
+                },
+                gamma2,
+            ) = ppc(*e2, &A_prime, state)?;
+
+            // S =unify({τu =τu′ | u:τu ∈Γ1,u:τu′ ∈Γ2})
+            let s = unify(
+                gamma1
+                    .intersected_variables(&gamma2)
+                    .into_iter()
+                    .map(|(left, right)| Equation { left, right })
+                    .collect(),
+            )?;
+
+            // Γ′ =SΓ1 ∪SΓ2
+            let gamma_prime = gamma1.applied_by(&s).union(&gamma2.applied_by(&s));
+
+            // ss=sat(Sκ1 ∪ Sκ2, Γ′)
+            let ss = sat(k1.applied_by(&s).union(k2.applied_by(&s)), &gamma_prime);
+
+            // in if S=∅ then fail
+            let ss = match ss.split_first() {
+                None => Err(InferError::NotSatifiable),
+                Some((head, tail)) => Ok(NonEmpty(head.clone(), tail.to_vec())),
+            }?;
+
+            // else let S∆ =intersect S,
+            let s_delta = intersection(ss);
+
+            // Γ=S∆Γ′,
+            let gamma = gamma_prime.applied_by(&s_delta);
+
+            // τ=S∆Sτ2
+            let t = t2.applied_by(&s).applied_by(&s_delta);
+
+            // V =tv(τ,Γ),
+            let v = t.free_type_variables().union(gamma.free_type_variables());
+
+            // κ = unresolved(S∆S(κ1 ∪κ2),Γ)
+            let k = unresolved(k1.union(k2).applied_by(&s).applied_by(&s_delta), &gamma);
+
+            // in (κ|∗V .τ,Γ)
+            Ok((
+                ConstrainedType {
+                    constraints: k.closure_restrictions(&v),
+                    r#type: t,
+                },
+                gamma,
+            ))
+        }
+    }
+}
+
+/// The overloading policy is given by (redefining ρ as) ρc:
+///
+/// ρc (o : ∀αj . κ. τ , T ) =
+///   T = ∅ or
+///   tv(∀αj.κ.τ)=∅ and for each σ=∀(βk).κ′.τ′ ∈T unify({τ = τ′}) fails and tv(σ) = ∅
+fn overloadable(
+    Type {
+        type_variables: alpha,
+        constrained_type:
+            ConstrainedType {
+                constraints: k,
+                r#type: t,
+            },
+    }: &Type,
+    T: Vec<Type>,
+) -> bool {
+    T.is_empty()
+        || (Type {
+            type_variables: alpha.clone(),
+            constrained_type: ConstrainedType {
+                constraints: k.clone(),
+                r#type: t.clone(),
+            },
+        }
+        .free_type_variables()
+        .is_empty()
+            && T.iter().all(
+                |theta @ Type {
+                     constrained_type:
+                         ConstrainedType {
+                             r#type: t_prime, ..
+                         },
+                     ..
+                 }| {
+                    unify(vec![Equation {
+                        left: t.clone(),
+                        right: t_prime.clone(),
+                    }])
+                    .is_err()
+                        && theta.free_type_variables().is_empty()
+                },
+            ))
+}
+
+/// Rule (LET) uses function close, to quantify simple and constrained types over type variables
+/// that are not free in a typing context:
+/// ```
+/// close(∆, Γ ) = ∀αj . ∆, where {αj } = tv(∆) − tv(Γ ).
+/// ```
+fn close(delta: ConstrainedType, gamma: &TypingContext) -> Type {
+    Type {
+        type_variables: delta.free_type_variables() - gamma.free_type_variables(),
+        constrained_type: delta,
     }
 }
 
@@ -910,8 +1089,16 @@ fn unify(equations: Vec<Equation>) -> Result<Substitutions, InferError> {
 #[derive(Debug)]
 pub enum InferError {
     RecursiveSubstitution,
-    CannotUnify { left: String, right: String },
+    CannotUnify {
+        left: String,
+        right: String,
+    },
     NotSatifiable,
+    CannotBeOverloaded {
+        name: String,
+        r#type: Type,
+        existing_types: Vec<Type>,
+    },
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
@@ -1137,7 +1324,7 @@ fn pte(
     env: &TypingEnvironment,
     state: &mut State,
 ) -> (ConstrainedType, TypingContext) {
-    match env.types_of(&name).split_first() {
+    match env.entries_of(&name).split_first() {
         // if A(x) = ∅ then (α, {x : α}), where α is a fresh type variable
         None => {
             let a = ConstrainedType {
@@ -1155,16 +1342,22 @@ fn pte(
         }
         // if A(x)={(∀αj.κ.τ,Γ)} then(κ.τ,Γ),
         //   with quantified type variables {αj} renamed as fresh type variables
-        Some((TypingEntry { scheme, context }, [])) => (scheme.instantiate(state), context.clone()),
+        Some((
+            TypingEntry {
+                r#type: scheme,
+                context,
+            },
+            [],
+        )) => (scheme.instantiate(state), context.clone()),
         // else ({x′ : lcg({τi})}. lcg({τi}), U Γi[x′/x]),
         //   where A(x)={(∀(αj)i.κi.τi,Γi)} and x′ is a fresh term variable
         Some((head, tail)) => {
             let x_prime = state.fresh_term_variable();
             let lcgti = lcg(
                 NonEmpty(
-                    head.scheme.constrained_type.r#type.clone(),
+                    head.r#type.constrained_type.r#type.clone(),
                     tail.iter()
-                        .map(|entry| entry.scheme.constrained_type.r#type.clone())
+                        .map(|entry| entry.r#type.constrained_type.r#type.clone())
                         .collect(),
                 ),
                 state,
