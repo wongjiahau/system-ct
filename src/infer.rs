@@ -1,5 +1,6 @@
 use array_tool::vec::{Intersect, Union, Uniq};
 use rpds::HashTrieSet as Set;
+use std::ops;
 
 pub enum Term {
     Int(isize),
@@ -69,7 +70,7 @@ impl Constraints {
             Some((head, tail)) => {
                 // {o:τ}|V =if tv(τ)∩V =∅ then ∅ else {o:τ}
                 let Constraint { name: o, r#type: t } = head;
-                if t.free_type_variables().intersect(v.to_vec()).is_empty() {
+                if t.free_type_variables().intersect(v).is_empty() {
                     Constraints(vec![])
                 } else {
                     Constraints(vec![Constraint {
@@ -82,6 +83,20 @@ impl Constraints {
             }
         }
     }
+
+    /// The closure of restricting a set of constraints κ to a set of type variables V , denoted by κ|∗V , is defined as follows:
+    fn closure_restrictions(&self, v: &TypeVariables) -> Constraints {
+        let k_v = self.restrictions(&v);
+        // κ|V if tv(κ|V) ⊆ V
+        if k_v.free_type_variables().is_subset_of(&v) {
+            k_v
+        }
+        // κ|∗tv(κ|V) otherwise
+        else {
+            self.closure_restrictions(&k_v.free_type_variables())
+        }
+    }
+
     fn applied_by(&self, substitutions: &Substitutions) -> Constraints {
         Constraints(
             self.0
@@ -104,8 +119,17 @@ impl Constraints {
         )
     }
 
-    fn union(&self, s: Constraints) -> Constraints {
-        todo!()
+    fn union(&self, other: Constraints) -> Constraints {
+        Constraints(self.0.union(other.0))
+    }
+
+    fn free_type_variables(&self) -> TypeVariables {
+        TypeVariables(
+            self.0
+                .iter()
+                .flat_map(|constraint| constraint.free_type_variables().0)
+                .collect(),
+        )
     }
 }
 
@@ -129,6 +153,7 @@ impl Type {
     }
     fn instantiate(&self, state: &mut State) -> ConstrainedType {
         self.type_variables
+            .0
             .iter()
             .fold(self.constrained_type.clone(), |result, a| {
                 result.substitute_type(a, &type_variable(state.fresh_type_variable()))
@@ -169,6 +194,10 @@ impl Constraint {
             name: self.name.clone(),
             r#type: self.r#type.applied_by(substitutions),
         }
+    }
+
+    fn free_type_variables(&self) -> TypeVariables {
+        self.r#type.free_type_variables()
     }
 }
 
@@ -242,15 +271,15 @@ impl SimpleType {
         result.extend(
             self.arguments
                 .iter()
-                .flat_map(|argument| argument.free_type_variables())
-                .collect::<TypeVariables>(),
+                .flat_map(|argument| argument.free_type_variables().0)
+                .collect::<Vec<String>>(),
         );
-        result
+        TypeVariables(result)
     }
 
     fn as_type(self) -> Type {
         Type {
-            type_variables: vec![],
+            type_variables: TypeVariables(vec![]),
             constrained_type: ConstrainedType {
                 constraints: Constraints(vec![]),
                 r#type: self,
@@ -391,14 +420,16 @@ impl TypingContext {
         )
     }
 
-    fn free_type_variables(&self) -> Vec<String> {
-        self.0
-            .into_iter()
-            .filter_map(|entry| match &entry.r#type.constrained_type.r#type.kind {
-                TypeKind::TypeConstructor(_) => None,
-                TypeKind::TypeVariable(a) => Some(a.clone()),
-            })
-            .collect()
+    fn free_type_variables(&self) -> TypeVariables {
+        TypeVariables(
+            self.0
+                .into_iter()
+                .filter_map(|entry| match &entry.r#type.constrained_type.r#type.kind {
+                    TypeKind::TypeConstructor(_) => None,
+                    TypeKind::TypeVariable(a) => Some(a.clone()),
+                })
+                .collect(),
+        )
     }
 }
 
@@ -572,13 +603,41 @@ pub fn ppc(
 
                     //κ=unresolved(S∆S(κ1 ∪κ2),Γ)
                     let k = unresolved(k1.union(k2).applied_by(&s).applied_by(&s_delta), &gamma);
-                    todo!()
+
+                    // if ambiguous(tv(S∆Sκ1),κ,V)
+                    if ambiguous(
+                        k1.applied_by(&s).applied_by(&s_delta).free_type_variables(),
+                        &k,
+                        &v,
+                    )
+                    // then fail
+                    {
+                        panic!("Fail")
+                    }
+                    // else (κ|∗V .τ,Γ)
+                    else {
+                        Ok((
+                            ConstrainedType {
+                                constraints: k.closure_restrictions(&v),
+                                r#type: t,
+                            },
+                            gamma,
+                        ))
+                    }
                 }
             }
         }
         Term::Let { name, value, body } => todo!(),
         Term::Int(_) => todo!(),
     }
+}
+
+/// ambiguous(V1,κ,V)=
+///   V′ ̸= ∅ and V′ ⊆V1
+///     where V′ = tv(κ) − tv(κ|∗V )
+fn ambiguous(v1: TypeVariables, k: &Constraints, v: &TypeVariables) -> bool {
+    let v_prime = k.free_type_variables() - k.closure_restrictions(&v).free_type_variables();
+    v_prime.is_empty() && v_prime.is_subset_of(&v1)
 }
 
 fn unresolved(constraints: Constraints, gamma: &TypingContext) -> Constraints {
@@ -688,10 +747,7 @@ fn sat(k: Constraints, gamma: &TypingContext) -> Vec<Substitutions> {
                         } = theta_i;
 
                         // V = tv(τi) − ({(αj)i} ∪ tv(τ))
-                        let v = vect_difference(
-                            &t_i.free_type_variables(),
-                            &a_j_i.union(t.free_type_variables()),
-                        );
+                        let v = t_i.free_type_variables() - a_j_i.union(t.free_type_variables());
 
                         // S=Unify({τ=τi},V)
                         let s = match Unify(
@@ -839,7 +895,7 @@ struct Equation {
 
 fn unify(equations: Vec<Equation>) -> Result<Substitutions, InferError> {
     // unify(E) = Unify(E, ∅)
-    Unify(equations, vec![])
+    Unify(equations, TypeVariables(vec![]))
 }
 
 #[derive(Debug)]
@@ -849,7 +905,8 @@ pub enum InferError {
     NotSatifiable,
 }
 
-type TypeVariables = Vec<String>;
+#[derive(PartialEq, Eq, Debug, Clone, Hash)]
+struct TypeVariables(Vec<String>);
 
 fn Unify(
     equations: Vec<Equation>,
@@ -1081,7 +1138,7 @@ fn pte(
             let context = TypingContext(Set::new().insert(Typing {
                 variable: name,
                 r#type: Type {
-                    type_variables: vec![],
+                    type_variables: TypeVariables(vec![]),
                     constrained_type: a.clone(),
                 },
             }));
@@ -1422,9 +1479,19 @@ impl Equation {
         }
     }
 }
+
 fn vect_difference<T: Eq + Clone>(v1: &Vec<T>, v2: &Vec<T>) -> Vec<T> {
     v1.iter().filter(|&x| !v2.contains(x)).cloned().collect()
 }
+
+impl ops::Sub<TypeVariables> for TypeVariables {
+    type Output = TypeVariables;
+
+    fn sub(self, rhs: TypeVariables) -> Self::Output {
+        TypeVariables(vect_difference(&self.0, &rhs.0))
+    }
+}
+
 impl Substitution {
     fn print(&self) -> String {
         match self {
@@ -1470,5 +1537,30 @@ impl Substitution {
                 }
             },
         }
+    }
+}
+
+impl TypeVariables {
+    fn is_subset_of(&self, v: &TypeVariables) -> bool {
+        use std::collections::HashSet;
+
+        let xs: HashSet<String> = HashSet::from_iter(self.0.clone().into_iter());
+        xs.is_subset(&HashSet::from_iter(v.0.clone().into_iter()))
+    }
+
+    fn contains(&self, a: &String) -> bool {
+        self.0.contains(a)
+    }
+
+    fn intersect(&self, other: &TypeVariables) -> TypeVariables {
+        TypeVariables(self.0.intersect(other.0.clone()))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn union(&self, other: TypeVariables) -> TypeVariables {
+        TypeVariables(self.0.union(other.0))
     }
 }
