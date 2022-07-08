@@ -1548,6 +1548,10 @@ fn boolean() -> SimpleType {
     named_type("boolean".to_string(), vec![])
 }
 
+fn character() -> SimpleType {
+    named_type("character".to_string(), vec![])
+}
+
 /// Expression ptε(x,A) computes both type and context for x in A, similarly to pt(x,Γ),
 /// introducing fresh type variables for let-bound variables as defined below:
 fn pte(
@@ -2077,6 +2081,70 @@ mod tests {
             ppc(term, &env).unwrap().0,
             ConstrainedType::new_simple_type(boolean())
         )
+    }
+
+    #[test]
+    fn appendix_example_3() {
+        // The need for the side-condition in rule (LET) is illustrated by the following
+        // simple example. Consider a typing context Γ with typings, say,
+        //
+        //   f : Int → Int,
+        //   f : Float → Float,
+        //   g : Bool → Bool, and
+        //   g : Char → Char.
+        //
+        // The following term should not be typeable in this context:
+        //
+        //   λx. let y = f x in g x
+        //
+        // This is detected in System CT due to the fact that
+        //
+        //   sat({f : αx → α,g : αx → β}, {Γ, x : αx}) = ∅
+        //     (where α and β are fresh type variables).
+        let env = TypingEnvironment {
+            elements: Set::new()
+                .insert(TypingEnvElement::new(
+                    "f".to_string(),
+                    Type::new_simple_type(function_type(int(), int())),
+                ))
+                .insert(TypingEnvElement::new(
+                    "f".to_string(),
+                    Type::new_simple_type(function_type(float(), float())),
+                ))
+                .insert(TypingEnvElement::new(
+                    "g".to_string(),
+                    Type::new_simple_type(function_type(boolean(), boolean())),
+                ))
+                .insert(TypingEnvElement::new(
+                    "g".to_string(),
+                    Type::new_simple_type(function_type(character(), character())),
+                )),
+        };
+
+        let term = Term::Lambda {
+            parameter: "x".to_string(),
+            body: Box::new(Term::Let {
+                name: "y".to_string(),
+                value: Box::new(Term::Application {
+                    function: Box::new(Term::Var {
+                        name: "f".to_string(),
+                    }),
+                    argument: Box::new(Term::Var {
+                        name: "x".to_string(),
+                    }),
+                }),
+                body: Box::new(Term::Application {
+                    function: Box::new(Term::Var {
+                        name: "g".to_string(),
+                    }),
+                    argument: Box::new(Term::Var {
+                        name: "x".to_string(),
+                    }),
+                }),
+            }),
+        };
+
+        assert!(ppc(term, &env).is_err())
     }
 }
 impl Equation {
