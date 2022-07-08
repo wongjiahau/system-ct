@@ -2045,6 +2045,39 @@ mod tests {
             Err(InferError::NotSatifiable)
         );
     }
+
+    #[test]
+    fn appendix_example_2() {
+        // In rule (LET), not all constraints in κ1 apply to the type of the let-expression. For
+        // example, in a typing context Γ where o is overloaded, term
+        //
+        //   let x = o in True
+        //
+        // has type Bool.
+
+        let term = Term::Let {
+            name: "x".to_string(),
+            value: Box::new(Term::Var {
+                name: "o".to_string(),
+            }),
+            body: Box::new(Term::Bool(true)),
+        };
+        let env = TypingEnvironment {
+            elements: Set::new()
+                .insert(TypingEnvElement::new(
+                    "o".to_string(),
+                    Type::new_simple_type(int()),
+                ))
+                .insert(TypingEnvElement::new(
+                    "o".to_string(),
+                    Type::new_simple_type(float()),
+                )),
+        };
+        assert_eq!(
+            ppc(term, &env).unwrap().0,
+            ConstrainedType::new_simple_type(boolean())
+        )
+    }
 }
 impl Equation {
     fn print(&self) -> String {
