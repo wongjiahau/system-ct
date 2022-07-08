@@ -911,67 +911,75 @@ fn intersection(ss: NonEmpty<Substitutions>) -> Substitutions {
 }
 
 fn sat(k: Constraints, gamma: &TypingContext) -> Vec<Substitutions> {
-    match k.0.split_first() {
+    match k.0.as_slice() {
         // sat(∅,Γ) = {id}
-        None => vec![Substitutions::Identity],
+        [] => vec![Substitutions::Identity],
 
-        Some((head, tail)) => {
-            let Constraint { name: o, r#type: t } = head;
-            match tail.split_first() {
-                // sat({o:τ},Γ)= U [...]
-                // {S| S=Unify({τ=τi},V)and sat(Sκi,SΓ)̸=∅} where V = tv(τi) − ({(αj)i} ∪ tv(τ)) and σi = ∀(αj)i. κi. τi
-                None => gamma
-                    .types_of(o)
-                    .iter()
-                    .filter_map(|theta_i| {
-                        // σi = ∀(αj)i. κi. τi
-                        let Type {
-                            type_variables: a_j_i,
-                            constrained_type:
-                                ConstrainedType {
-                                    constraints: k_i,
-                                    r#type: t_i,
-                                },
-                        } = theta_i;
+        // sat({o:τ},Γ)= U [...]
+        // {S| S=Unify({τ=τi},V)and sat(Sκi,SΓ)̸=∅} where V = tv(τi) − ({(αj)i} ∪ tv(τ)) and σi = ∀(αj)i. κi. τi
+        [Constraint { name: o, r#type: t }] => {
+            gamma
+                .types_of(o)
+                .iter()
+                .filter_map(|theta_i| {
+                    // σi = ∀(αj)i. κi. τi
+                    let Type {
+                        type_variables: a_j_i,
+                        constrained_type:
+                            ConstrainedType {
+                                constraints: k_i,
+                                r#type: t_i,
+                            },
+                    } = theta_i;
 
-                        // V = tv(τi) − ({(αj)i} ∪ tv(τ))
-                        let v = t_i.free_type_variables() - a_j_i.union(t.free_type_variables());
+                    // V = tv(τi) − ({(αj)i} ∪ tv(τ))
+                    let v = t_i.free_type_variables() - a_j_i.union(t.free_type_variables());
 
-                        // S=Unify({τ=τi},V)
-                        let s = match Unify(
-                            vec![Equation {
-                                left: t.clone(),
-                                right: t_i.clone(),
-                            }],
-                            v,
-                        ) {
-                            Ok(s) => s,
-                            Err(_) => return None,
-                        };
+                    // S=Unify({τ=τi},V)
+                    let s = match Unify(
+                        vec![Equation {
+                            left: t.clone(),
+                            right: t_i.clone(),
+                        }],
+                        v,
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => return None,
+                    };
 
-                        // ... and sat(Sκi,SΓ)̸=∅
-                        if sat(k_i.applied_by(&s), &gamma.applied_by(&s)).is_empty() {
-                            None
-                        } else {
-                            Some(s)
-                        }
-                    })
-                    .collect(),
-                // sat({o:τ}∪κ,Γ)=U Si∈sat({o:τ},Γ) U Sij∈sat(Siκ,SiΓ){Sij ◦Si}
-                Some(_) => {
-                    let k = Constraints(tail.to_vec());
-                    let sis = sat(Constraints(vec![head.clone()]), gamma);
-                    sis.into_iter()
-                        .flat_map(|si| {
-                            let sijs = sat(k.applied_by(&si), &gamma.applied_by(&si));
-                            sijs.into_iter()
-                                .map(|sij| sij.compose(&si))
-                                .collect::<Vec<Substitutions>>()
-                        })
-                        .collect::<Vec<Substitutions>>()
-                        .unique()
+                    // ... and sat(Sκi,SΓ)̸=∅
+                    if sat(k_i.applied_by(&s), &gamma.applied_by(&s)).is_empty() {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                })
+                .collect()
+        }
+
+        [Constraint { name: o, r#type: t }, k @ ..] => {
+            // sat({o:τ}∪κ,Γ)=U Si∈sat({o:τ},Γ) U Sij∈sat(Siκ,SiΓ){Sij ◦Si}
+            //
+            let sis = sat(
+                Constraints(vec![Constraint {
+                    name: o.clone(),
+                    r#type: t.clone(),
                 }
-            }
+                .clone()]),
+                gamma,
+            );
+            sis.into_iter()
+                .flat_map(|si| {
+                    let sijs = sat(
+                        Constraints(k.to_vec()).applied_by(&si),
+                        &gamma.applied_by(&si),
+                    );
+                    sijs.into_iter()
+                        .map(|sij| sij.compose(&si))
+                        .collect::<Vec<Substitutions>>()
+                })
+                .collect::<Vec<Substitutions>>()
+                .unique()
         }
     }
 }
