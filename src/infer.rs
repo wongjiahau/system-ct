@@ -1,7 +1,9 @@
 use array_tool::vec::{Intersect, Union, Uniq};
+use itertools::*;
 use rpds::HashTrieSet as Set;
-use std::ops;
+use std::{fmt::format, ops};
 
+#[derive(Debug, Clone)]
 pub enum Term {
     Int(isize),
     /// x
@@ -128,7 +130,19 @@ impl Constraints {
             self.0
                 .iter()
                 .flat_map(|constraint| constraint.free_type_variables().0)
+                .unique()
                 .collect(),
+        )
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "{{{}}}",
+            self.0
+                .iter()
+                .map(Constraint::print)
+                .collect::<Vec<String>>()
+                .join(", ")
         )
     }
 }
@@ -149,6 +163,32 @@ struct Type {
 }
 
 impl Type {
+    fn print(&self) -> String {
+        let type_variables = if self.type_variables.is_empty() {
+            "".to_string()
+        } else {
+            format!(
+                "forall {}.",
+                self.type_variables
+                    .0
+                    .iter()
+                    .map(|type_variable| type_variable.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            )
+        };
+        let constraints = if self.constrained_type.constraints.is_empty() {
+            "".to_string()
+        } else {
+            format!("{{{}}}", self.constrained_type.constraints.print())
+        };
+        format!(
+            "{}{}{}",
+            type_variables,
+            constraints,
+            self.constrained_type.r#type.print()
+        )
+    }
     fn is_simple_type(&self) -> bool {
         self.type_variables.is_empty() && self.constrained_type.constraints.is_empty()
     }
@@ -175,6 +215,16 @@ impl Type {
     fn free_type_variables(&self) -> TypeVariables {
         self.constrained_type.free_type_variables() - self.type_variables.clone()
     }
+
+    fn new_simple_type(simple_type: SimpleType) -> Type {
+        Type {
+            type_variables: TypeVariables(vec![]),
+            constrained_type: ConstrainedType {
+                constraints: Constraints(vec![]),
+                r#type: simple_type,
+            },
+        }
+    }
 }
 
 impl ConstrainedType {
@@ -189,6 +239,31 @@ impl ConstrainedType {
         self.constraints
             .free_type_variables()
             .union(self.r#type.free_type_variables())
+    }
+
+    fn print(&self) -> String {
+        format!("{}. {}", self.constraints.print(), self.r#type.print())
+    }
+
+    fn alpha_conversion(&self) -> Self {
+        let mut state = State::new();
+        self.applied_by(&Substitutions::from_vector(
+            self.free_type_variables()
+                .0
+                .iter()
+                .map(|a| Substitution::SubstituteType {
+                    old: a.to_string(),
+                    new: type_variable(format!("''{}", state.fresh_type_variable())),
+                })
+                .collect(),
+        ))
+    }
+
+    fn applied_by(&self, substitutions: &Substitutions) -> ConstrainedType {
+        ConstrainedType {
+            constraints: self.constraints.applied_by(substitutions),
+            r#type: self.r#type.applied_by(substitutions),
+        }
     }
 }
 
@@ -210,23 +285,30 @@ impl Constraint {
     fn free_type_variables(&self) -> TypeVariables {
         self.r#type.free_type_variables()
     }
+
+    fn print(&self) -> String {
+        format!("{}: {}", self.name, self.r#type.print())
+    }
 }
 
 impl SimpleType {
     fn substitute_type(&self, type_variable: &String, with_type: &SimpleType) -> SimpleType {
-        SimpleType {
-            kind: match &self.kind {
-                c @ TypeKind::TypeConstructor(_) => c.clone(),
-                TypeKind::TypeVariable(name) => TypeKind::TypeVariable(if name.eq(type_variable) {
+        let kind = match &self.kind {
+            TypeKind::TypeVariable(name) => {
+                if name.eq(type_variable) {
                     // Assert that there is no arguments for this type,
                     // because substitution can only happen for type variable,
                     // not constructor variable
                     assert!(self.arguments.is_empty());
-                    type_variable.to_string()
+                    return with_type.clone();
                 } else {
-                    name.clone()
-                }),
-            },
+                    TypeKind::TypeVariable(name.clone())
+                }
+            }
+            c @ TypeKind::TypeConstructor(_) => c.clone(),
+        };
+        SimpleType {
+            kind,
             arguments: self
                 .arguments
                 .clone()
@@ -368,6 +450,21 @@ struct TypingEnvElement {
     entry: TypingEntry,
 }
 
+impl TypingEnvElement {
+    fn new(name: String, r#type: Type) -> Self {
+        TypingEnvElement {
+            name: name.clone(),
+            entry: TypingEntry {
+                r#type: r#type.clone(),
+                context: TypingContext(Set::new().insert(Typing {
+                    variable: name,
+                    r#type,
+                })),
+            },
+        }
+    }
+}
+
 /// Pair (σ,Γ) is called an entry for x in A
 #[derive(PartialEq, Eq, Clone, Debug)]
 struct TypingEntry {
@@ -388,6 +485,16 @@ impl std::hash::Hash for TypingEntry {
 pub struct TypingContext(Set<Typing>);
 
 impl TypingContext {
+    fn print(&self) -> String {
+        format!(
+            "[{}]",
+            self.0
+                .iter()
+                .map(|typing| typing.print())
+                .collect::<Vec<String>>()
+                .join(", ")
+        )
+    }
     fn types_of(&self, name: &String) -> Set<Type> {
         self.0
             .iter()
@@ -509,6 +616,14 @@ impl State {
 pub fn ppc(
     term: Term,
     A: &TypingEnvironment,
+) -> Result<(ConstrainedType, TypingContext), InferError> {
+    ppc_helper(term, A, &mut State::new())
+}
+
+/// The type inference algorithm helper.
+pub fn ppc_helper(
+    term: Term,
+    A: &TypingEnvironment,
     state: &mut State,
 ) -> Result<(ConstrainedType, TypingContext), InferError> {
     match term {
@@ -527,7 +642,7 @@ pub fn ppc(
                     r#type: t,
                 },
                 gamma,
-            ) = ppc(*e, A, state)?;
+            ) = ppc_helper(*e, A, state)?;
             //  if u:τ′ ∈ Γ,for some τ′
             if let Some(scheme) = gamma
                 .types_of(&u)
@@ -569,6 +684,9 @@ pub fn ppc(
             function: e1,
             argument: e2,
         } => {
+            println!("e1 = {:#?}", e1);
+            println!("e2 = {:#?}", e2);
+
             // let (κ1 . τ1 , Γ1) = PPc (e1 , A)
             let (
                 ConstrainedType {
@@ -576,7 +694,10 @@ pub fn ppc(
                     r#type: t1,
                 },
                 gamma1,
-            ) = ppc(*e1, A, state)?;
+            ) = ppc_helper(*e1, A, state)?;
+
+            println!("t1 = {}", t1.print());
+            println!("gamma1 = {}", gamma1.print());
 
             // (κ2 . τ2 , Γ2) = PPc (e2 , A)
             let (
@@ -585,7 +706,10 @@ pub fn ppc(
                     r#type: t2,
                 },
                 gamma2,
-            ) = ppc(*e2, A, state)?;
+            ) = ppc_helper(*e2, A, state)?;
+
+            println!("t2 = {}", t2.print());
+            println!("gamma2 = {}", gamma2.print());
 
             // S=unify({τu =τu′ |u:τu ∈ Γ1 and u:τu′ ∈ Γ2} ∪ {τ1 =τ2 → α})
             // where α is a fresh type variable
@@ -603,13 +727,41 @@ pub fn ppc(
                 });
                 equations
             };
+
+            println!(
+                "equations = [{}]",
+                equations
+                    .iter()
+                    .map(Equation::print)
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            );
+
             let s = unify(equations)?;
+
+            println!("s = {}", s.print());
 
             // Γ′ =SΓ1 ∪ SΓ2
             let gamma_prime = gamma1.applied_by(&s).union(&gamma2.applied_by(&s));
+            println!("gamma_prime = {}", gamma_prime.print());
 
             // ss =sat(Sκ1 ∪ Sκ2,Γ′)
             let ss = sat(k1.applied_by(&s).union(k2.applied_by(&s)), &gamma_prime);
+
+            println!("k1 = {}", k1.print());
+            println!("Sκ1 = {}", k1.applied_by(&s).print());
+            println!(
+                "Sκ1 ∪ Sκ2 = {}",
+                k1.applied_by(&s).union(k2.applied_by(&s)).print()
+            );
+
+            println!(
+                "ss = {}",
+                ss.iter()
+                    .map(|s| s.print())
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            );
 
             // if ss =∅ then fail
             match ss.split_first() {
@@ -619,17 +771,28 @@ pub fn ppc(
                     // let S∆ = intesection ss,
                     let s_delta = intersection(NonEmpty(head.clone(), tail.to_vec()));
 
+                    println!("S∆ = {}", s_delta.print());
+
                     // Γ=S∆Γ′,
                     let gamma = gamma_prime.applied_by(&s_delta);
 
                     // τ=S∆Sα,
                     let t = a.applied_by(&s).applied_by(&s_delta);
+                    println!("t = {}", t.print());
 
                     //V =tv(τ,Γ),
                     let v = t.free_type_variables().union(gamma.free_type_variables());
 
                     //κ=unresolved(S∆S(κ1 ∪κ2),Γ)
                     let k = unresolved(k1.union(k2).applied_by(&s).applied_by(&s_delta), &gamma);
+
+                    println!(
+                        "tv(S∆Sκ1) = {}",
+                        k1.applied_by(&s)
+                            .applied_by(&s_delta)
+                            .free_type_variables()
+                            .print()
+                    );
 
                     // if ambiguous(tv(S∆Sκ1),κ,V)
                     if ambiguous(
@@ -643,6 +806,8 @@ pub fn ppc(
                     }
                     // else (κ|∗V .τ,Γ)
                     else {
+                        println!("k = {}", k.print());
+                        println!("v = {}", v.print());
                         Ok((
                             ConstrainedType {
                                 constraints: k.closure_restrictions(&v),
@@ -678,7 +843,7 @@ pub fn ppc(
                     r#type: t1,
                 },
                 gamma1,
-            ) = ppc(*e1, A, state)?;
+            ) = ppc_helper(*e1, A, state)?;
 
             // σ = close(κ1. τ1, Γ1)
             let theta = close(
@@ -714,7 +879,7 @@ pub fn ppc(
                     r#type: t2,
                 },
                 gamma2,
-            ) = ppc(*e2, &A_prime, state)?;
+            ) = ppc_helper(*e2, &A_prime, state)?;
 
             // S =unify({τu =τu′ | u:τu ∈Γ1,u:τu′ ∈Γ2})
             let s = unify(
@@ -821,11 +986,11 @@ fn close(delta: ConstrainedType, gamma: &TypingContext) -> Type {
 }
 
 /// ambiguous(V1,κ,V)=
-///   V′ ̸= ∅ and V′ ⊆V1
+///   V′ ̸!= ∅ and V′ ⊆ V1
 ///     where V′ = tv(κ) − tv(κ|∗V )
 fn ambiguous(v1: TypeVariables, k: &Constraints, v: &TypeVariables) -> bool {
     let v_prime = k.free_type_variables() - k.closure_restrictions(&v).free_type_variables();
-    v_prime.is_empty() && v_prime.is_subset_of(&v1)
+    !v_prime.is_empty() && v_prime.is_subset_of(&v1)
 }
 
 fn unresolved(constraints: Constraints, gamma: &TypingContext) -> Constraints {
@@ -954,7 +1119,7 @@ fn sat(k: Constraints, gamma: &TypingContext) -> Vec<Substitutions> {
                         Some(s)
                     }
                 })
-                .collect()
+                .collect::<Vec<Substitutions>>()
         }
 
         [Constraint { name: o, r#type: t }, k @ ..] => {
@@ -995,10 +1160,25 @@ enum Substitutions {
 }
 
 impl Substitutions {
+    fn from_vector(substitutions: Vec<Substitution>) -> Self {
+        match substitutions.split_first() {
+            None => Substitutions::Identity,
+            Some((first, rest)) => Substitutions::Compose {
+                left: Box::new(Substitutions::from_vector(rest.to_vec())),
+                right: first.clone(),
+            },
+        }
+    }
     fn print(&self) -> String {
+        format!("[{}]", self.print_())
+    }
+
+    fn print_(&self) -> String {
         match self {
             Substitutions::Compose { left, right } => {
-                format!("{}, {}", left.print(), right.print())
+                // Remember that right comes before left
+                // So to ease reading, we print the one that comes first on the left
+                format!("{}, {}", right.print(), left.print_())
             }
             Substitutions::Identity => "".to_string(),
         }
@@ -1094,7 +1274,7 @@ fn unify(equations: Vec<Equation>) -> Result<Substitutions, InferError> {
     Unify(equations, TypeVariables(vec![]))
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum InferError {
     RecursiveSubstitution,
     CannotUnify {
@@ -1111,6 +1291,19 @@ pub enum InferError {
 
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
 struct TypeVariables(Vec<String>);
+
+impl TypeVariables {
+    fn print(&self) -> String {
+        format!(
+            "[{}]",
+            self.0
+                .iter()
+                .map(|v| v.clone())
+                .collect::<Vec<String>>()
+                .join(", ")
+        )
+    }
+}
 
 fn Unify(
     equations: Vec<Equation>,
@@ -1325,6 +1518,21 @@ fn function_type(input: SimpleType, output: SimpleType) -> SimpleType {
     }
 }
 
+fn named_type(name: String, arguments: Vec<SimpleType>) -> SimpleType {
+    SimpleType {
+        kind: TypeKind::TypeConstructor(name),
+        arguments,
+    }
+}
+
+fn int() -> SimpleType {
+    named_type("int".to_string(), vec![])
+}
+
+fn float() -> SimpleType {
+    named_type("float".to_string(), vec![])
+}
+
 /// Expression ptε(x,A) computes both type and context for x in A, similarly to pt(x,Γ),
 /// introducing fresh type variables for let-bound variables as defined below:
 fn pte(
@@ -1370,10 +1578,12 @@ fn pte(
                 ),
                 state,
             );
+            println!("pte name = {}", name);
+            println!("head.context = {}", head.context.print());
             (
                 ConstrainedType {
                     constraints: Constraints(vec![Constraint {
-                        name: state.fresh_term_variable(),
+                        name: x_prime.clone(),
                         r#type: lcgti.clone(),
                     }]),
                     r#type: lcgti,
@@ -1482,11 +1692,74 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
 
-    fn named_type(name: String, arguments: Vec<SimpleType>) -> SimpleType {
-        SimpleType {
-            kind: TypeKind::TypeConstructor(name),
-            arguments,
-        }
+    #[test]
+    fn test_apply_substitution_1() {
+        // substitutions = [a ~> b, b ~> c, ]
+        let substitutions = Substitutions::from_vector(vec![
+            Substitution::SubstituteType {
+                old: "a".to_string(),
+                new: type_variable("b".to_string()),
+            },
+            Substitution::SubstituteType {
+                old: "b".to_string(),
+                new: type_variable("c".to_string()),
+            },
+        ]);
+
+        // k = {x: a -> a}
+        let k = Constraints(vec![Constraint {
+            name: "x".to_string(),
+            r#type: function_type(
+                type_variable("a".to_string()),
+                type_variable("a".to_string()),
+            ),
+        }]);
+
+        // S(k) should be {x: c -> c}
+        let expected_sk = Constraints(vec![Constraint {
+            name: "x".to_string(),
+            r#type: function_type(
+                type_variable("c".to_string()),
+                type_variable("c".to_string()),
+            ),
+        }]);
+
+        let actual_sk = k.applied_by(&substitutions);
+
+        assert_eq!(actual_sk.print(), expected_sk.print())
+    }
+
+    #[test]
+    fn test_unify_1() {
+        // equations = [(a -> a) = (b -> c)]
+        // expected substitutions = [a ~> b, b ~> c]
+
+        let equations = vec![Equation {
+            left: function_type(
+                type_variable("a".to_string()),
+                type_variable("a".to_string()),
+            ),
+            right: function_type(
+                type_variable("b".to_string()),
+                type_variable("c".to_string()),
+            ),
+        }];
+
+        let result = unify(equations);
+
+        let expected = Ok(Substitutions::from_vector(vec![
+            Substitution::SubstituteType {
+                old: "a".to_string(),
+                new: type_variable("b".to_string()),
+            },
+            Substitution::SubstituteType {
+                old: "b".to_string(),
+                new: type_variable("c".to_string()),
+            },
+        ])
+        .print());
+
+        assert_eq!(result.map(|substitutions| substitutions.print()), expected)
     }
 
     #[test]
@@ -1556,12 +1829,6 @@ mod tests {
     /// where S1 = (α → Int,β → Float)
     ///   and S2 = (α → Float, β → Int).
     fn test_sat_1() {
-        fn int() -> SimpleType {
-            named_type("int".to_string(), vec![])
-        }
-        fn float() -> SimpleType {
-            named_type("float".to_string(), vec![])
-        }
         let gamma = TypingContext(
             Set::new()
                 .insert(Typing {
@@ -1671,8 +1938,66 @@ mod tests {
         ]);
         assert!(sat(k, &gamma).is_empty());
     }
+
+    #[test]
+    fn appendix_example_1() {
+        // In a typing context Γ with typings, say, f : Int → Int and f : Float → Float, term:
+        //
+        //   λx. let y = f x in x
+        //
+        // has type {f : α → α}.α → α, not α → α.
+
+        let env = TypingEnvironment {
+            elements: Set::new()
+                .insert(TypingEnvElement::new(
+                    "f".to_string(),
+                    Type::new_simple_type(function_type(int(), int())),
+                ))
+                .insert(TypingEnvElement::new(
+                    "f".to_string(),
+                    Type::new_simple_type(function_type(float(), float())),
+                )),
+        };
+
+        let term = Term::Lambda {
+            parameter: "x".to_string(),
+            body: Box::new(Term::Let {
+                name: "y".to_string(),
+                value: Box::new(Term::Application {
+                    function: Box::new(Term::Var {
+                        name: "f".to_string(),
+                    }),
+                    argument: Box::new(Term::Var {
+                        name: "x".to_string(),
+                    }),
+                }),
+                body: Box::new(Term::Var {
+                    name: "x".to_string(),
+                }),
+            }),
+        };
+
+        let a = type_variable("'0".to_string());
+        let expected_type = Ok(ConstrainedType {
+            constraints: Constraints(vec![Constraint {
+                name: "#0".to_string(),
+                r#type: function_type(a.clone(), a.clone()),
+            }]),
+            r#type: function_type(a.clone(), a.clone()),
+        }
+        .alpha_conversion()
+        .print());
+
+        assert_eq!(
+            ppc(term, &env).map(|result| result.0.alpha_conversion().print()),
+            expected_type
+        )
+    }
 }
 impl Equation {
+    fn print(&self) -> String {
+        format!("{} = {}", self.left.print(), self.right.print())
+    }
     fn substitute_type(&self, type_variable: &String, with_type: &SimpleType) -> Equation {
         Equation {
             left: self.left.substitute_type(type_variable, with_type),
@@ -1724,7 +2049,14 @@ impl Substitution {
     fn apply(&self, simple_type: &SimpleType) -> SimpleType {
         match self {
             Substitution::SubstituteType { old, new } => match &simple_type.kind {
-                TypeKind::TypeConstructor(_) => simple_type.clone(),
+                TypeKind::TypeConstructor(c) => SimpleType {
+                    kind: TypeKind::TypeConstructor(c.clone()),
+                    arguments: simple_type
+                        .arguments
+                        .iter()
+                        .map(|argument| self.apply(argument))
+                        .collect(),
+                },
                 TypeKind::TypeVariable(a) => {
                     if a.eq(old) {
                         new.clone()
@@ -1742,7 +2074,11 @@ impl Substitution {
                     };
                     SimpleType {
                         kind,
-                        arguments: simple_type.arguments.clone(),
+                        arguments: simple_type
+                            .arguments
+                            .iter()
+                            .map(|argument| self.apply(argument))
+                            .collect(),
                     }
                 }
             },
@@ -1772,5 +2108,10 @@ impl TypeVariables {
 
     fn union(&self, other: TypeVariables) -> TypeVariables {
         TypeVariables(self.0.union(other.0))
+    }
+}
+impl Typing {
+    fn print(&self) -> String {
+        format!("{}: {}", self.variable, self.r#type.print())
     }
 }
