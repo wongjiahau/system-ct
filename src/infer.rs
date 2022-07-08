@@ -6,6 +6,8 @@ use std::{fmt::format, ops};
 #[derive(Debug, Clone)]
 pub enum Term {
     Int(isize),
+    Float(f64),
+    Bool(bool),
     /// x
     Var {
         name: String,
@@ -228,6 +230,12 @@ impl Type {
 }
 
 impl ConstrainedType {
+    fn new_simple_type(simple_type: SimpleType) -> Self {
+        ConstrainedType {
+            constraints: Constraints(vec![]),
+            r#type: simple_type,
+        }
+    }
     fn substitute_type(&self, type_variable: &String, with_type: &SimpleType) -> ConstrainedType {
         ConstrainedType {
             constraints: self.constraints.substitute_type(type_variable, with_type),
@@ -627,6 +635,19 @@ pub fn ppc_helper(
     state: &mut State,
 ) -> Result<(ConstrainedType, TypingContext), InferError> {
     match term {
+        Term::Int(_) => Ok((
+            ConstrainedType::new_simple_type(int()),
+            TypingContext(Set::new()),
+        )),
+        Term::Float(_) => Ok((
+            ConstrainedType::new_simple_type(float()),
+            TypingContext(Set::new()),
+        )),
+        Term::Bool(_) => Ok((
+            ConstrainedType::new_simple_type(boolean()),
+            TypingContext(Set::new()),
+        )),
+
         // PPc(x,A) = ptε(x,A)
         Term::Var { name: x } => Ok(pte(x, A, state)),
 
@@ -819,16 +840,6 @@ pub fn ppc_helper(
                 }
             }
         }
-        Term::Int(_) => Ok((
-            ConstrainedType {
-                constraints: Constraints(vec![]),
-                r#type: SimpleType {
-                    kind: TypeKind::TypeConstructor("Int".to_string()),
-                    arguments: vec![],
-                },
-            },
-            TypingContext(Set::new()),
-        )),
 
         // PPc(let o = e1 in e2,A) =
         Term::Let {
@@ -1533,6 +1544,10 @@ fn float() -> SimpleType {
     named_type("float".to_string(), vec![])
 }
 
+fn boolean() -> SimpleType {
+    named_type("boolean".to_string(), vec![])
+}
+
 /// Expression ptε(x,A) computes both type and context for x in A, similarly to pt(x,Γ),
 /// introducing fresh type variables for let-bound variables as defined below:
 fn pte(
@@ -1898,7 +1913,7 @@ mod tests {
             .map(Substitutions::print)
             .collect::<Vec<String>>();
         actual.sort();
-        assert_eq!(actual, vec![s2, s1]);
+        assert_eq!(actual, vec![s1, s2]);
     }
 
     #[test]
@@ -1989,9 +2004,46 @@ mod tests {
         .print());
 
         assert_eq!(
-            ppc(term, &env).map(|result| result.0.alpha_conversion().print()),
+            ppc(term.clone(), &env).map(|result| result.0.alpha_conversion().print()),
             expected_type
-        )
+        );
+
+        // An application of this term to another of type Int (or Float) is well-typed.
+        assert_eq!(
+            ppc(
+                Term::Application {
+                    function: Box::new(term.clone()),
+                    argument: Box::new(Term::Int(0))
+                },
+                &env
+            )
+            .map(|result| result.0),
+            Ok(ConstrainedType::new_simple_type(int()))
+        );
+
+        assert_eq!(
+            ppc(
+                Term::Application {
+                    function: Box::new(term.clone()),
+                    argument: Box::new(Term::Float(0.0))
+                },
+                &env
+            )
+            .map(|result| result.0),
+            Ok(ConstrainedType::new_simple_type(float()))
+        );
+
+        // while an application to a term of type Bool, for example, is not.
+        assert_eq!(
+            ppc(
+                Term::Application {
+                    function: Box::new(term),
+                    argument: Box::new(Term::Bool(true))
+                },
+                &env
+            ),
+            Err(InferError::NotSatifiable)
+        );
     }
 }
 impl Equation {
