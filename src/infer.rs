@@ -261,7 +261,7 @@ impl ConstrainedType {
                 .iter()
                 .map(|a| Substitution::SubstituteType {
                     old: a.to_string(),
-                    new: type_variable(format!("''{}", state.fresh_type_variable())),
+                    new: type_variable(format!("'{}", state.fresh_type_variable())),
                 })
                 .collect(),
         ))
@@ -404,7 +404,7 @@ impl SimpleType {
             return name.clone();
         }
 
-        format!("{}<{}>", name, arguments)
+        format!("{}[{}]", name, arguments)
     }
 }
 
@@ -578,10 +578,7 @@ impl TypingContext {
         TypeVariables(
             self.0
                 .into_iter()
-                .filter_map(|entry| match &entry.r#type.constrained_type.r#type.kind {
-                    TypeKind::TypeConstructor(_) => None,
-                    TypeKind::TypeVariable(a) => Some(a.clone()),
-                })
+                .flat_map(|entry| entry.r#type.free_type_variables().0)
                 .collect(),
         )
     }
@@ -613,8 +610,8 @@ impl State {
         self.fresh_type_variable_index += 1;
         result
     }
-    fn fresh_term_variable(&mut self) -> String {
-        let result = format!("#{}", self.fresh_term_variable_index);
+    fn fresh_term_variable(&mut self, original_name: &String) -> String {
+        let result = format!("{}#{}", original_name, self.fresh_term_variable_index);
         self.fresh_term_variable_index += 1;
         result
     }
@@ -664,6 +661,9 @@ pub fn ppc_helper(
                 },
                 gamma,
             ) = ppc_helper(*e, A, state)?;
+
+            println!("k={}", k.print());
+
             //  if u:τ′ ∈ Γ,for some τ′
             if let Some(scheme) = gamma
                 .types_of(&u)
@@ -771,6 +771,8 @@ pub fn ppc_helper(
 
             println!("k1 = {}", k1.print());
             println!("Sκ1 = {}", k1.applied_by(&s).print());
+            println!("k2 = {}", k2.print());
+            println!("Sκ2 = {}", k2.applied_by(&s).print());
             println!(
                 "Sκ1 ∪ Sκ2 = {}",
                 k1.applied_by(&s).union(k2.applied_by(&s)).print()
@@ -797,14 +799,26 @@ pub fn ppc_helper(
                     // Γ=S∆Γ′,
                     let gamma = gamma_prime.applied_by(&s_delta);
 
+                    println!("gamma = {}", gamma.print());
+
                     // τ=S∆Sα,
                     let t = a.applied_by(&s).applied_by(&s_delta);
                     println!("t = {}", t.print());
 
                     //V =tv(τ,Γ),
+                    println!("tv(t) = {}", t.free_type_variables().print());
+                    println!("tv(gamma) = {}", gamma.free_type_variables().print());
                     let v = t.free_type_variables().union(gamma.free_type_variables());
 
                     //κ=unresolved(S∆S(κ1 ∪κ2),Γ)
+                    println!(
+                        "S∆S(κ1 ∪κ2) = {}",
+                        k1.union(k2.clone())
+                            .applied_by(&s)
+                            .applied_by(&s_delta)
+                            .print()
+                    );
+
                     let k = unresolved(k1.union(k2).applied_by(&s).applied_by(&s_delta), &gamma);
 
                     println!(
@@ -829,6 +843,7 @@ pub fn ppc_helper(
                     else {
                         println!("k = {}", k.print());
                         println!("v = {}", v.print());
+                        println!("k|*v = {}", k.closure_restrictions(&v).print());
                         Ok((
                             ConstrainedType {
                                 constraints: k.closure_restrictions(&v),
@@ -1004,6 +1019,7 @@ fn ambiguous(v1: TypeVariables, k: &Constraints, v: &TypeVariables) -> bool {
     !v_prime.is_empty() && v_prime.is_subset_of(&v1)
 }
 
+/// Search for unresolved constraints over a given typing context
 fn unresolved(constraints: Constraints, gamma: &TypingContext) -> Constraints {
     match constraints.0.split_first() {
         // unresolved (∅, Γ ) = ∅
@@ -1064,6 +1080,14 @@ fn unresolved(constraints: Constraints, gamma: &TypingContext) -> Constraints {
 
 /// The intersection of a set of substitutions S, denoted by intersection(S), is defined as follows:
 fn intersection(ss: NonEmpty<Substitutions>) -> Substitutions {
+    println!(
+        "[intersection] ss = {}, {}",
+        ss.0.print(),
+        ss.1.iter()
+            .map(|s| s.print())
+            .collect::<Vec<String>>()
+            .join(", ")
+    );
     match ss.1.split_first() {
         // intersection {S} = S
         None => ss.0,
@@ -1081,6 +1105,8 @@ fn intersection(ss: NonEmpty<Substitutions>) -> Substitutions {
                     }
                 })
             });
+            println!("[intersection] v = {}", v.join(", "));
+            println!("[intersection] S|V = {}", s.restrictions(&v).print());
             s.restrictions(&v)
         }
     }
@@ -1524,7 +1550,7 @@ fn type_variable(name: String) -> SimpleType {
 
 fn function_type(input: SimpleType, output: SimpleType) -> SimpleType {
     SimpleType {
-        kind: TypeKind::TypeConstructor("->".to_string()),
+        kind: TypeKind::TypeConstructor("fn".to_string()),
         arguments: vec![input, output],
     }
 }
@@ -1587,7 +1613,7 @@ fn pte(
         // else ({x′ : lcg({τi})}. lcg({τi}), U Γi[x′/x]),
         //   where A(x)={(∀(αj)i.κi.τi,Γi)} and x′ is a fresh term variable
         Some((head, tail)) => {
-            let x_prime = state.fresh_term_variable();
+            let x_prime = state.fresh_term_variable(&name);
             let lcgti = lcg(
                 NonEmpty(
                     head.r#type.constrained_type.r#type.clone(),
@@ -1790,13 +1816,13 @@ mod tests {
         fn bool() -> SimpleType {
             named_type("Bool".to_string(), vec![])
         }
-        let int_to_int = named_type("->".to_string(), vec![int(), int()]);
-        let bool_to_bool = named_type("->".to_string(), vec![bool(), bool()]);
+        let int_to_int = function_type(int(), int());
+        let bool_to_bool = function_type(bool(), bool());
 
         fn alpha() -> SimpleType {
             type_variable("'0".to_string())
         }
-        let expected_type = named_type("->".to_string(), vec![alpha(), alpha()]);
+        let expected_type = function_type(alpha(), alpha());
         assert_eq!(
             lcg(NonEmpty(int_to_int, vec![bool_to_bool]), &mut State::new()),
             expected_type
@@ -1999,7 +2025,7 @@ mod tests {
         let a = type_variable("'0".to_string());
         let expected_type = Ok(ConstrainedType {
             constraints: Constraints(vec![Constraint {
-                name: "#0".to_string(),
+                name: "f#0".to_string(),
                 r#type: function_type(a.clone(), a.clone()),
             }]),
             r#type: function_type(a.clone(), a.clone()),
@@ -2145,6 +2171,53 @@ mod tests {
         };
 
         assert!(ppc(term, &env).is_err())
+    }
+
+    #[test]
+    fn appendix_example_4() {
+        // Consider a typing context Γ with typings one:Int and one:Float. The following is a type derivation for
+        //
+        //   λf. f one : {one : α}. (α → β) → β
+        //
+        // where α and β do not occur in Γ.
+        let env = TypingEnvironment {
+            elements: Set::new()
+                .insert(TypingEnvElement::new(
+                    "one".to_string(),
+                    Type::new_simple_type(int()),
+                ))
+                .insert(TypingEnvElement::new(
+                    "one".to_string(),
+                    Type::new_simple_type(float()),
+                )),
+        };
+        let term = Term::Lambda {
+            parameter: "f".to_string(),
+            body: Box::new(Term::Application {
+                function: Box::new(Term::Var {
+                    name: "f".to_string(),
+                }),
+                argument: Box::new(Term::Var {
+                    name: "one".to_string(),
+                }),
+            }),
+        };
+
+        let mut state = State::new();
+        let a = type_variable(state.fresh_type_variable());
+        let b = type_variable(state.fresh_type_variable());
+        let expected_type = ConstrainedType {
+            constraints: Constraints(vec![Constraint {
+                name: state.fresh_term_variable(&"one".to_string()),
+                r#type: a.clone(),
+            }]),
+            r#type: function_type(function_type(a, b.clone()), b),
+        };
+
+        assert_eq!(
+            ppc(term, &env).unwrap().0.alpha_conversion().print(),
+            expected_type.alpha_conversion().print()
+        )
     }
 }
 impl Equation {
