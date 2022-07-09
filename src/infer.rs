@@ -810,6 +810,8 @@ pub fn ppc_helper(
                     println!("tv(gamma) = {}", gamma.free_type_variables().print());
                     let v = t.free_type_variables().union(gamma.free_type_variables());
 
+                    println!("v = {}", v.print());
+
                     //κ=unresolved(S∆S(κ1 ∪κ2),Γ)
                     println!(
                         "S∆S(κ1 ∪κ2) = {}",
@@ -820,6 +822,8 @@ pub fn ppc_helper(
                     );
 
                     let k = unresolved(k1.union(k2).applied_by(&s).applied_by(&s_delta), &gamma);
+
+                    println!("k = {}", k.print());
 
                     println!(
                         "tv(S∆Sκ1) = {}",
@@ -837,7 +841,7 @@ pub fn ppc_helper(
                     )
                     // then fail
                     {
-                        panic!("Fail")
+                        Err(InferError::Ambiguous)
                     }
                     // else (κ|∗V .τ,Γ)
                     else {
@@ -1015,7 +1019,14 @@ fn close(delta: ConstrainedType, gamma: &TypingContext) -> Type {
 ///   V′ ̸!= ∅ and V′ ⊆ V1
 ///     where V′ = tv(κ) − tv(κ|∗V )
 fn ambiguous(v1: TypeVariables, k: &Constraints, v: &TypeVariables) -> bool {
+    println!("[ambiguous] tv(κ) = {}", k.free_type_variables().print());
+    println!(
+        "[ambiguous] tv(κ|∗V) = {}",
+        k.closure_restrictions(&v).free_type_variables().print()
+    );
     let v_prime = k.free_type_variables() - k.closure_restrictions(&v).free_type_variables();
+    println!("[ambiguous] v_prime = {}", v_prime.print());
+    println!("[ambiguous] v1 = {}", v1.print());
     !v_prime.is_empty() && v_prime.is_subset_of(&v1)
 }
 
@@ -1324,6 +1335,7 @@ pub enum InferError {
         r#type: Type,
         existing_types: Vec<Type>,
     },
+    Ambiguous,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
@@ -2174,6 +2186,7 @@ mod tests {
     }
 
     #[test]
+    /// Appendix: A.1 Application to Overloaded Constant
     fn appendix_example_4() {
         // Consider a typing context Γ with typings one:Int and one:Float. The following is a type derivation for
         //
@@ -2219,7 +2232,239 @@ mod tests {
             expected_type.alpha_conversion().print()
         )
     }
+
+    #[test]
+    /// Appendix: A.2 Application to Overloaded Function
+    fn appendix_example_5() {
+        // Consider a typing context Γ with typings
+        //
+        //   g: Int → Int, g: Float → Int, and
+        //   one: Int, one :Float
+        //
+        let env = TypingEnvironment {
+            elements: Set::new()
+                .insert(TypingEnvElement::new(
+                    "g".to_string(),
+                    Type::new_simple_type(function_type(int(), int())),
+                ))
+                .insert(TypingEnvElement::new(
+                    "g".to_string(),
+                    Type::new_simple_type(function_type(float(), int())),
+                ))
+                .insert(TypingEnvElement::new(
+                    "one".to_string(),
+                    Type::new_simple_type(int()),
+                ))
+                .insert(TypingEnvElement::new(
+                    "one".to_string(),
+                    Type::new_simple_type(float()),
+                )),
+        };
+        // The following are derivable, from (VAR) (where α and α′ do not occur in Γ):
+        //
+        //   Γ ⊢ g: {g:α→Int}. α → Int
+        assert_eq!(
+            ppc(
+                Term::Var {
+                    name: "g".to_string()
+                },
+                &env
+            )
+            .unwrap()
+            .0
+            .alpha_conversion()
+            .print(),
+            ConstrainedType {
+                constraints: Constraints(vec![Constraint {
+                    name: "g#0".to_string(),
+                    r#type: function_type(type_variable("a".to_string()), int())
+                }]),
+                r#type: function_type(type_variable("a".to_string()), int())
+            }
+            .alpha_conversion()
+            .print()
+        );
+
+        //   Γ ⊢ one: {one : α′}. α′
+        assert_eq!(
+            ppc(
+                Term::Var {
+                    name: "one".to_string()
+                },
+                &env
+            )
+            .unwrap()
+            .0
+            .alpha_conversion()
+            .print(),
+            ConstrainedType {
+                constraints: Constraints(vec![Constraint {
+                    name: "one#0".to_string(),
+                    r#type: type_variable("one".to_string())
+                }]),
+                r#type: type_variable("one".to_string())
+            }
+            .alpha_conversion()
+            .print()
+        );
+
+        // g applied to one gives a type error, because ambiguous is true (as shown in section 3).
+        assert_eq!(
+            ppc(
+                Term::Application {
+                    function: Box::new(Term::Var {
+                        name: "g".to_string()
+                    }),
+                    argument: Box::new(Term::Var {
+                        name: "one".to_string()
+                    })
+                },
+                &env
+            ),
+            Err(InferError::Ambiguous)
+        );
+
+        // Expression g e, where e has type Int, has type Int, and analogously for the case that e has type Float.
+        assert_eq!(
+            ppc(
+                Term::Application {
+                    function: Box::new(Term::Var {
+                        name: "g".to_string()
+                    }),
+                    argument: Box::new(Term::Int(1))
+                },
+                &env
+            )
+            .unwrap()
+            .0,
+            ConstrainedType::new_simple_type(int())
+        );
+        assert_eq!(
+            ppc(
+                Term::Application {
+                    function: Box::new(Term::Var {
+                        name: "g".to_string()
+                    }),
+                    argument: Box::new(Term::Float(1.0))
+                },
+                &env
+            )
+            .unwrap()
+            .0,
+            ConstrainedType::new_simple_type(int())
+        );
+
+        // An application of g to an expression of a different type, other than Int or Float, causes a type error, since sat gives an empty set.
+        assert_eq!(
+            ppc(
+                Term::Application {
+                    function: Box::new(Term::Var {
+                        name: "g".to_string()
+                    }),
+                    argument: Box::new(Term::Bool(true))
+                },
+                &env
+            ),
+            Err(InferError::NotSatifiable)
+        );
+
+        // Considering typing context Γ, x : αx, the following are derivable: Γ,x:αx ⊢ g x:{g:αx →Int}.Int
+        assert_eq!(
+            ppc(
+                Term::Application {
+                    function: Box::new(Term::Var {
+                        name: "g".to_string()
+                    }),
+                    argument: Box::new(Term::Var {
+                        name: "x".to_string()
+                    })
+                },
+                &env.add_entry(
+                    "x".to_string(),
+                    TypingEntry {
+                        r#type: Type::new_simple_type(type_variable("ax".to_string())),
+                        context: TypingContext(Set::new().insert(Typing {
+                            variable: "x".to_string(),
+                            r#type: Type::new_simple_type(type_variable("ax".to_string()))
+                        }))
+                    }
+                )
+            )
+            .unwrap()
+            .0,
+            ConstrainedType {
+                constraints: Constraints(vec![Constraint {
+                    name: "g#0".to_string(),
+                    r#type: function_type(type_variable("ax".to_string()), int())
+                }]),
+                r#type: int()
+            }
+        );
+
+        // Γ ⊢λx.gx:{g:αx →Int}.αx →Int
+        assert_eq!(
+            ppc(
+                Term::Lambda {
+                    parameter: "x".to_string(),
+                    body: Box::new(Term::Application {
+                        function: Box::new(Term::Var {
+                            name: "g".to_string()
+                        }),
+                        argument: Box::new(Term::Var {
+                            name: "x".to_string()
+                        })
+                    })
+                },
+                &env.add_entry(
+                    "x".to_string(),
+                    TypingEntry {
+                        r#type: Type::new_simple_type(type_variable("ax".to_string())),
+                        context: TypingContext(Set::new().insert(Typing {
+                            variable: "x".to_string(),
+                            r#type: Type::new_simple_type(type_variable("ax".to_string()))
+                        }))
+                    }
+                )
+            )
+            .unwrap()
+            .0,
+            ConstrainedType {
+                constraints: Constraints(vec![Constraint {
+                    name: "g#0".to_string(),
+                    r#type: function_type(type_variable("ax".to_string()), int())
+                }]),
+                r#type: function_type(type_variable("ax".to_string()), int())
+            }
+        );
+
+        // For any expression e of type Int (or Float), the following is also derivable:
+        //
+        //   Γ ⊢(λx.gx)e:Int
+        assert_eq!(
+            ppc(
+                Term::Application {
+                    function: Box::new(Term::Lambda {
+                        parameter: "x".to_string(),
+                        body: Box::new(Term::Application {
+                            function: Box::new(Term::Var {
+                                name: "g".to_string()
+                            }),
+                            argument: Box::new(Term::Var {
+                                name: "x".to_string()
+                            })
+                        })
+                    }),
+                    argument: Box::new(Term::Int(1))
+                },
+                &env
+            )
+            .unwrap()
+            .0,
+            ConstrainedType::new_simple_type(int())
+        );
+    }
 }
+
 impl Equation {
     fn print(&self) -> String {
         format!("{} = {}", self.left.print(), self.right.print())
