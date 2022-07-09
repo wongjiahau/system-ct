@@ -1,7 +1,7 @@
 use array_tool::vec::{Intersect, Union, Uniq};
 use itertools::*;
 use rpds::HashTrieSet as Set;
-use std::{fmt::format, ops};
+use std::{borrow::Borrow, fmt::format, ops};
 
 #[derive(Debug, Clone)]
 pub enum Term {
@@ -28,6 +28,23 @@ pub enum Term {
         value: Box<Term>,
         body: Box<Term>,
     },
+}
+
+fn var(name: &str) -> Term {
+    Term::Var {
+        name: name.to_string(),
+    }
+}
+
+fn app(function: Term, argument: Term) -> Term {
+    Term::Application {
+        function: Box::new(function),
+        argument: Box::new(argument),
+    }
+}
+
+fn binary_app(argument1: Term, function: Term, argument2: Term) -> Term {
+    app(app(function, argument1), argument2)
 }
 
 /// Known as "Simple Types (τ)" in the paper
@@ -2462,6 +2479,82 @@ mod tests {
             .0,
             ConstrainedType::new_simple_type(int())
         );
+    }
+
+    #[test]
+    //Appendix: A.3 Overloaded Division
+    fn appendix_example_6() {
+        // Consider a typing context Γ with typings
+        // (/) : Int → Int → Int,
+        // (/) : Int → Int → Float,
+        // (/) : Float → Float → Float,
+        // (=) : Int → Int → Bool, and
+        // (=) : Float → Float → Bool
+        let env = TypingEnvironment {
+            elements: Set::new()
+                .insert(TypingEnvElement::new(
+                    "/".to_string(),
+                    // Remember function arrow is right associative.
+                    // For example: a -> b -> c means a -> (b -> c)
+                    Type::new_simple_type(function_type(int(), function_type(int(), int()))),
+                ))
+                .insert(TypingEnvElement::new(
+                    "/".to_string(),
+                    Type::new_simple_type(function_type(int(), function_type(int(), float()))),
+                ))
+                .insert(TypingEnvElement::new(
+                    "/".to_string(),
+                    Type::new_simple_type(function_type(float(), function_type(float(), float()))),
+                ))
+                .insert(TypingEnvElement::new(
+                    "=".to_string(),
+                    Type::new_simple_type(function_type(int(), function_type(int(), boolean()))),
+                ))
+                .insert(TypingEnvElement::new(
+                    "=".to_string(),
+                    Type::new_simple_type(function_type(
+                        float(),
+                        function_type(float(), boolean()),
+                    )),
+                )),
+        };
+
+        // Figure 6 presents a type derivation for
+        //
+        //   (4/2)/(5/2) = 1 : Bool
+        //
+        let term1 = binary_app(
+            binary_app(
+                binary_app(Term::Int(4), var("/"), Term::Int(2)),
+                var("/"),
+                binary_app(Term::Int(5), var("/"), Term::Int(2)),
+            ),
+            var("="),
+            Term::Int(1),
+        );
+
+        assert_eq!(
+            ppc(term1, &env).unwrap().0,
+            ConstrainedType::new_simple_type(boolean())
+        );
+
+        // From this type derivation, it is easy to see that
+        //
+        //   (4/2)/(5/2) = 1.0
+        //
+        // is not typable.
+        let term2 = binary_app(
+            binary_app(
+                binary_app(Term::Int(4), var("/"), Term::Int(2)),
+                var("/"),
+                binary_app(Term::Int(5), var("/"), Term::Int(2)),
+            ),
+            var("="),
+            Term::Float(1.0),
+        );
+
+        // The test ambiguous (∅, {/ : Int → Int → β, / : β → β → Float}, tv(Γ )) returns true, indicating the ambiguity.
+        assert_eq!(ppc(term2, &env), Err(InferError::Ambiguous))
     }
 }
 
